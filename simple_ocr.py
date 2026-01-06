@@ -13,6 +13,9 @@ from difflib import SequenceMatcher
 import cv2
 import easyocr
 from joblib import Parallel, delayed
+from pathlib import Path
+
+from utils import extract_video_frames
 
 def select_device():
     """Select CUDA device if available, otherwise CPU."""
@@ -26,14 +29,6 @@ def select_device():
         use_gpu = False
         print("CUDA not available. Using CPU.")
     return device, use_gpu
-
-boxes_pkl_path = "tests\\ocr testvideo laet_boxes.pkl"
-frames_dir = "tests\\ocr testvideo laet_frames"
-dict_path = "laet.json"
-output_pkl_path = "tests\\ocr testvideo laet_final_frame_boxes.pkl"
-
-languages = ["en", "de"]
-num_workers = 4
 
 def get_easyocr_reader(languages):
     """
@@ -1043,41 +1038,57 @@ def ocr_boxes_to_unified(frame_boxes, tracks=None):
         unified[frame_idx] = unified_list
     return unified
 
-with open(dict_path, 'r') as f:
-    names_to_detect = json.load(f)
+def main():
+    video_path = "all_videos/video_laet.mp4"
+    output_dir = Path("tests/video_laet")
+    boxes_pkl_path = output_dir / "boxes.pkl"
+    frames_dir = output_dir / "frames"
+    output_pkl_path = output_dir / "ocr.pkl"
+    dict_path = "laet.json"
 
-try:
-    with open(boxes_pkl_path, "rb") as f:
-        frame_boxes = pickle.load(f)
-except:
-    # Process frames to detect text boxes
-    frame_boxes = process_frames_parallel(frames_dir, languages, num_workers)
-    with open(boxes_pkl_path, "wb") as f:
-        pickle.dump(frame_boxes, f)
-    print(f"Saved detected text boxes to {boxes_pkl_path}")
+    languages = ["en", "de"]
+    num_workers = 4
 
-frame_boxes = merge_split_names(frame_boxes, names_to_detect)
+    frames_dir = extract_video_frames(video_path, output_dir=frames_dir, frame_step=1)
 
-# Normalize box heights first for easier tracking
-normalized_boxes, height_clusters = normalize_box_heights(frame_boxes)
+    with open(dict_path, 'r') as f:
+        names_to_detect = json.load(f)
 
-# Track and stabilize normalized boxes with more lenient thresholds
-tracked_boxes, ocr_tracks = enhanced_temporal_tracking(
-    normalized_boxes,
-    max_gap=6,
-    position_threshold=50,  # More lenient for vertical movement
-    size_threshold=0.4      # More lenient for size changes
-)
+    try:
+        with open(boxes_pkl_path, "rb") as f:
+            frame_boxes = pickle.load(f)
+    except:
+        # Process frames to detect text boxes
+        frame_boxes = process_frames_parallel(frames_dir, languages, num_workers)
+        with open(boxes_pkl_path, "wb") as f:
+            pickle.dump(frame_boxes, f)
+        print(f"Saved detected text boxes to {boxes_pkl_path}")
 
-# Split tracked boxes into words
-frame_boxes = split_boxes_into_words(tracked_boxes)
+    frame_boxes = merge_split_names(frame_boxes, names_to_detect)
 
-# Filter by names (merges word boxes back into name boxes)
-filtered_frame_boxes = filter_boxes_by_names(frame_boxes, names_to_detect)
+    # Normalize box heights first for easier tracking
+    normalized_boxes, height_clusters = normalize_box_heights(frame_boxes)
 
-unified = ocr_boxes_to_unified(filtered_frame_boxes, tracks=ocr_tracks)
-with open(output_pkl_path, 'wb') as f:
-    pickle.dump(unified, f)
+    # Track and stabilize normalized boxes with more lenient thresholds
+    tracked_boxes, ocr_tracks = enhanced_temporal_tracking(
+        normalized_boxes,
+        max_gap=6,
+        position_threshold=50,  # More lenient for vertical movement
+        size_threshold=0.4      # More lenient for size changes
+    )
 
-print(f"Created {len(ocr_tracks)} OCR tracks across {len(unified)} frames")
-print(f"Saved final OCR boxes with track_ids to {output_pkl_path}")
+    # Split tracked boxes into words
+    frame_boxes = split_boxes_into_words(tracked_boxes)
+
+    # Filter by names (merges word boxes back into name boxes)
+    filtered_frame_boxes = filter_boxes_by_names(frame_boxes, names_to_detect)
+
+    unified = ocr_boxes_to_unified(filtered_frame_boxes, tracks=ocr_tracks)
+    with open(output_pkl_path, 'wb') as f:
+        pickle.dump(unified, f)
+
+    print(f"Created {len(ocr_tracks)} OCR tracks across {len(unified)} frames")
+    print(f"Saved final OCR boxes with track_ids to {output_pkl_path}")
+
+if __name__ == "__main__":
+    main()
