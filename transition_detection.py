@@ -260,18 +260,16 @@ def save_transitions_to_file(transitions, video_path, output_dir=None):
     Args:
         transitions (list): List of (start_frame, end_frame) tuples
         video_path (str): Path to the video file (used to generate output filename)
-        output_dir (str): Directory to save the file (if None, saves in current directory)
+        output_dir (str): Directory to save the file (should be the video's output directory)
     """
-    # Generate output filename based on video filename
-    video_name = os.path.splitext(os.path.basename(video_path))[0].lower()
-    filename = f"{video_name}_transitions.txt"
-    
-    # Use output directory if provided
+    # Always save as 'transitions.txt' in the output directory
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        output_file = os.path.join(output_dir, filename)
+        output_file = os.path.join(output_dir, "transitions.txt")
     else:
-        output_file = filename
+        # If no output_dir provided, save in current directory with video name prefix
+        video_name = os.path.splitext(os.path.basename(video_path))[0].lower()
+        output_file = f"{video_name}_transitions.txt"
     
     with open(output_file, 'w') as f:
         f.write("# Scene Transition Ranges\n")

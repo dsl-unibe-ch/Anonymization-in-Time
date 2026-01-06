@@ -576,6 +576,249 @@ def convert_results_to_unified_dict(all_results, tracks=None):
     return unified
 
 
+def process_video_sam3(frames_folder, output_folder, text_prompt="profile image, profile picture",
+                      batch_size=4, device='cuda', mask_mode='color', blur_strength=51,
+                      masks_propagation=True, max_gap=5, save_images=False):
+    """
+    Process frames from a single video with SAM3.
+    
+    Args:
+        frames_folder (str or Path): Path to folder containing extracted frames
+        output_folder (str or Path): Path to folder for saving results (should be same as frames parent)
+        text_prompt (str): Text prompt to segment
+        batch_size (int): Batch size for inference
+        device (str): Device to use ('cuda' or 'cpu')
+        mask_mode (str): Mask visualization mode ('color' or 'blur')
+        blur_strength (int): Blur kernel size for blur mode (must be odd)
+        masks_propagation (bool): Enable temporal mask propagation
+        max_gap (int): Maximum frame gap to fill when propagating masks
+        save_images (bool): Save images with masks overlaid
+        
+    Returns:
+        dict: Unified SAM3 data with track_ids
+    """
+    frames_folder = Path(frames_folder)
+    output_folder = Path(output_folder)
+    
+    print(f"\n{'='*60}")
+    print(f"Processing SAM3 for: {frames_folder}")
+    print(f"Output folder: {output_folder}")
+    print(f"{'='*60}\n")
+    
+    # Validate blur strength
+    if blur_strength % 2 == 0:
+        blur_strength += 1
+        print(f"Blur strength adjusted to {blur_strength} (must be odd)")
+    
+    # Validate device
+    if device == "cuda" and not torch.cuda.is_available():
+        print("CUDA not available, falling back to CPU")
+        device = "cpu"
+    
+    # Setup
+    print("Loading model...")
+    model = setup_model(device)
+    transform = setup_transforms()
+    postprocessor = setup_postprocessor()
+    
+    # Create output folder
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Get all images
+    image_files = get_image_files(frames_folder)
+    print(f"Found {len(image_files)} images in {frames_folder}")
+    
+    if len(image_files) == 0:
+        print("No images found!")
+        return None
+    
+    print(f"Processing with text prompt: '{text_prompt}'")
+    print(f"Batch size: {batch_size}")
+    print(f"Device: {device}")
+    print(f"Mask mode: {mask_mode}")
+    if mask_mode == 'blur':
+        print(f"Blur strength: {blur_strength}")
+    if not masks_propagation:
+        print(f"Temporal propagation disabled")
+    else:
+        print(f"Temporal propagation enabled (max gap: {max_gap} frames)")
+    
+    pickle_path = output_folder / 'detected_masks.pkl'
+    try:
+        with open(pickle_path, 'rb') as f:
+            all_results = pickle.load(f)
+        print(f"Loaded existing results from {pickle_path}, skipping processing")
+    except FileNotFoundError:
+        all_results = []
+        print(f"Mask mode: {mask_mode}")
+        if mask_mode == 'blur':
+            print(f"Blur strength: {blur_strength}")
+        print("\nStarting processing...")
+        
+        query_id = 1
+        for batch_start in tqdm(range(0, len(image_files), batch_size), desc="Processing batches"):
+            batch_files = image_files[batch_start:batch_start + batch_size]
+            
+            datapoints = []
+            image_ids = []
+            
+            for img_path in batch_files:
+                try:
+                    img = Image.open(img_path).convert('RGB')
+                    datapoint = create_datapoint(img, text_prompt, query_id)
+                    image_ids.append(query_id)
+                    query_id += 1
+                    datapoint = transform(datapoint)
+                    datapoints.append(datapoint)
+                except Exception as e:
+                    print(f"Error loading {img_path}: {e}")
+                    continue
+            
+            if len(datapoints) == 0:
+                continue
+            
+            try:
+                results = process_batch(model, datapoints, image_ids, postprocessor, device)
+                results = slim_batch_results(results, pad=10, pack_bits=False)
+                for img_path, img_id in zip(batch_files, image_ids):
+                    frame_idx = len(all_results)
+                    all_results.append((frame_idx, results.get(img_id, {}), img_path))
+            except Exception as e:
+                print(f"Error processing batch: {e}")
+                continue
+
+        print(f"\nSaving masks to pickle: {pickle_path}")
+        with open(pickle_path, 'wb') as f:
+            pickle.dump(all_results, f)
+        print(f"Saved {len(all_results)} frames with masks")
+    
+    pickle_path_propagated = output_folder / 'detected_masks_propagated.pkl'
+    tracks = None
+    try:
+        with open(pickle_path_propagated, 'rb') as f:
+            all_results = pickle.load(f)
+        print(f"Loaded existing propagated results from {pickle_path_propagated}, skipping propagation")
+        tracks_path = output_folder / 'mask_tracks.pkl'
+        try:
+            with open(tracks_path, 'rb') as f:
+                tracks = pickle.load(f)
+            print(f"Loaded {len(tracks)} mask tracks")
+        except FileNotFoundError:
+            if len(all_results) > 1:
+                tracks = match_masks_across_frames(all_results)
+                print(f"Regenerated {len(tracks)} mask tracks")
+    except FileNotFoundError:
+        if masks_propagation and len(all_results) > 1:
+            print(f"\nApplying temporal mask propagation...")
+            tracks = match_masks_across_frames(all_results)
+            print(f"Found {len(tracks)} mask tracks across {len(all_results)} frames")
+            filled_count = propagate_missing_masks(all_results, tracks, max_gap)
+            print(f"Filled {filled_count} missing mask(s)")
+        
+        print(f"\nSaving masks to pickle: {pickle_path_propagated}")
+        with open(pickle_path_propagated, 'wb') as f:
+            pickle.dump(all_results, f)
+        print(f"Saved {len(all_results)} frames with propagated masks")
+        
+        if tracks:
+            tracks_path = output_folder / 'mask_tracks.pkl'
+            with open(tracks_path, 'wb') as f:
+                pickle.dump(tracks, f)
+            print(f"Saved {len(tracks)} mask tracks to {tracks_path}")
+
+    # Save unified dict format to sam3.pkl
+    unified_path = output_folder / 'sam3.pkl'
+    try:
+        with open(unified_path, 'rb') as f:
+            unified = pickle.load(f)
+        print(f"Unified detections already exist at {unified_path}, skipping conversion")
+    except FileNotFoundError:
+        unified = convert_results_to_unified_dict(all_results, tracks)
+        with open(unified_path, 'wb') as f:
+            pickle.dump(unified, f)
+        print(f"Saved unified detections to {unified_path} ({len(unified)} frames)")
+        
+    if save_images:
+        print(f"\nSaving processed images...")
+        for frame_idx, frame_results, img_path in tqdm(all_results, desc="Saving images"):
+            output_path = output_folder / f"{img_path.stem}_result.png"
+            img = Image.open(img_path).convert('RGB')
+            saved = save_images_with_masks(
+                img, frame_results, output_path, 
+                mode=mask_mode, alpha=0.5, blur_strength=blur_strength
+            )
+            if not saved:
+                img.save(output_path)
+    
+    print(f"✓ SAM3 processing complete for {frames_folder.parent.name}")
+    return unified
+
+
+def process_videos_sam3_batch(video_folders, text_prompt="profile image, profile picture",
+                              batch_size=4, device='cuda', mask_mode='color', blur_strength=51,
+                              masks_propagation=True, max_gap=5, save_images=False):
+    """
+    Process multiple video folders with SAM3 in batch.
+    
+    Args:
+        video_folders (list): List of paths to video output folders (each should contain frames/ subdirectory)
+        text_prompt (str): Text prompt to segment
+        batch_size (int): Batch size for inference
+        device (str): Device to use ('cuda' or 'cpu')
+        mask_mode (str): Mask visualization mode ('color' or 'blur')
+        blur_strength (int): Blur kernel size for blur mode (must be odd)
+        masks_propagation (bool): Enable temporal mask propagation
+        max_gap (int): Maximum frame gap to fill when propagating masks
+        save_images (bool): Save images with masks overlaid
+        
+    Returns:
+        dict: Dictionary mapping video names to their unified SAM3 data
+    """
+    results = {}
+    
+    print(f"\n{'='*60}")
+    print(f"BATCH PROCESSING SAM3: {len(video_folders)} videos")
+    print(f"{'='*60}\n")
+    
+    for video_folder in video_folders:
+        video_folder = Path(video_folder)
+        frames_folder = video_folder / "frames"
+        video_name = video_folder.name
+        
+        if not frames_folder.exists():
+            print(f"✗ Skipping {video_name}: frames folder not found at {frames_folder}")
+            results[video_name] = None
+            continue
+        
+        try:
+            unified = process_video_sam3(
+                frames_folder=frames_folder,
+                output_folder=video_folder,
+                text_prompt=text_prompt,
+                batch_size=batch_size,
+                device=device,
+                mask_mode=mask_mode,
+                blur_strength=blur_strength,
+                masks_propagation=masks_propagation,
+                max_gap=max_gap,
+                save_images=save_images
+            )
+            results[video_name] = unified
+            print(f"✓ Successfully processed {video_name}")
+        except Exception as e:
+            print(f"✗ Error processing {video_name}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            results[video_name] = None
+    
+    print(f"\n{'='*60}")
+    print(f"BATCH SAM3 PROCESSING COMPLETE")
+    print(f"Successful: {sum(1 for v in results.values() if v is not None)}/{len(video_folders)}")
+    print(f"{'='*60}\n")
+    
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description='SAM3 Batch Inference on Image Folder')
     parser.add_argument('--input_folder', type=str, required=True,

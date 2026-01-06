@@ -2,6 +2,7 @@ import subprocess
 import cv2
 import os
 import glob
+from tqdm import tqdm
 
 ######### VIDEO LOADING & SAVING #########
 
@@ -119,7 +120,7 @@ def extract_video_frames(video_path, output_dir=None, frame_step=1, starting_sec
     expected_frame_count = (total_frames_in_range - 1) // frame_step + 1 if total_frames_in_range > 0 else 0
 
     # Check for existing frames in the output directory
-    existing_frames = glob(os.path.join(output_dir, "*.jpg"))
+    existing_frames = glob.glob(os.path.join(output_dir, "*.jpg"))
     if existing_frames:
         if len(existing_frames) == expected_frame_count:
             print(f"✔️  Found existing frames ({len(existing_frames)} frames). Skipping extraction.\n")

@@ -1038,37 +1038,61 @@ def ocr_boxes_to_unified(frame_boxes, tracks=None):
         unified[frame_idx] = unified_list
     return unified
 
-def main():
-    video_path = "all_videos/video_laet.mp4"
-    output_dir = Path("tests/video_laet")
+def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"], num_workers=4, 
+                      extract_frames=True, frame_step=1):
+    """
+    Process a single video for OCR detection.
+    
+    Args:
+        video_path (str or Path): Path to the video file
+        output_dir (str or Path): Directory to save outputs (frames/, ocr.pkl, boxes.pkl)
+        dict_path (str or Path): Path to JSON file with names to detect
+        languages (list): Languages for EasyOCR (default: ["en", "de"])
+        num_workers (int): Number of parallel workers for processing
+        extract_frames (bool): Whether to extract frames from video (default: True)
+        frame_step (int): Step between frames to extract (default: 1)
+        
+    Returns:
+        dict: Unified OCR data with track_ids
+    """
+    output_dir = Path(output_dir)
     boxes_pkl_path = output_dir / "boxes.pkl"
     frames_dir = output_dir / "frames"
     output_pkl_path = output_dir / "ocr.pkl"
-    dict_path = "laet.json"
-
-    languages = ["en", "de"]
-    num_workers = 4
-
-    frames_dir = extract_video_frames(video_path, output_dir=frames_dir, frame_step=1)
-
+    
+    print(f"\n{'='*60}")
+    print(f"Processing video: {video_path}")
+    print(f"Output directory: {output_dir}")
+    print(f"{'='*60}\n")
+    
+    # Extract frames if requested
+    if extract_frames:
+        frames_dir = extract_video_frames(video_path, output_dir=frames_dir, frame_step=frame_step)
+    else:
+        print(f"Using existing frames in {frames_dir}")
+    
+    # Load names dictionary
     with open(dict_path, 'r') as f:
         names_to_detect = json.load(f)
-
+    
+    # Process frames or load existing boxes
     try:
         with open(boxes_pkl_path, "rb") as f:
             frame_boxes = pickle.load(f)
+        print(f"Loaded existing text boxes from {boxes_pkl_path}")
     except:
         # Process frames to detect text boxes
         frame_boxes = process_frames_parallel(frames_dir, languages, num_workers)
         with open(boxes_pkl_path, "wb") as f:
             pickle.dump(frame_boxes, f)
         print(f"Saved detected text boxes to {boxes_pkl_path}")
-
+    
+    # Apply OCR pipeline
     frame_boxes = merge_split_names(frame_boxes, names_to_detect)
-
+    
     # Normalize box heights first for easier tracking
     normalized_boxes, height_clusters = normalize_box_heights(frame_boxes)
-
+    
     # Track and stabilize normalized boxes with more lenient thresholds
     tracked_boxes, ocr_tracks = enhanced_temporal_tracking(
         normalized_boxes,
@@ -1076,19 +1100,100 @@ def main():
         position_threshold=50,  # More lenient for vertical movement
         size_threshold=0.4      # More lenient for size changes
     )
-
+    
     # Split tracked boxes into words
     frame_boxes = split_boxes_into_words(tracked_boxes)
-
+    
     # Filter by names (merges word boxes back into name boxes)
     filtered_frame_boxes = filter_boxes_by_names(frame_boxes, names_to_detect)
-
+    
+    # Convert to unified format
     unified = ocr_boxes_to_unified(filtered_frame_boxes, tracks=ocr_tracks)
+    
+    # Save final output
     with open(output_pkl_path, 'wb') as f:
         pickle.dump(unified, f)
-
+    
     print(f"Created {len(ocr_tracks)} OCR tracks across {len(unified)} frames")
     print(f"Saved final OCR boxes with track_ids to {output_pkl_path}")
+    
+    return unified
+
+
+def process_videos_batch(video_paths, output_base_dir, dict_path, languages=["en", "de"], 
+                        num_workers=4, extract_frames=True, frame_step=1):
+    """
+    Process multiple videos for OCR detection in batch.
+    
+    Args:
+        video_paths (list): List of paths to video files
+        output_base_dir (str or Path): Base directory for outputs (each video gets a subfolder)
+        dict_path (str or Path): Path to JSON file with names to detect
+        languages (list): Languages for EasyOCR (default: ["en", "de"])
+        num_workers (int): Number of parallel workers for processing
+        extract_frames (bool): Whether to extract frames from videos (default: True)
+        frame_step (int): Step between frames to extract (default: 1)
+        
+    Returns:
+        dict: Dictionary mapping video names to their unified OCR data
+    """
+    output_base_dir = Path(output_base_dir)
+    results = {}
+    
+    print(f"\n{'='*60}")
+    print(f"BATCH PROCESSING: {len(video_paths)} videos")
+    print(f"{'='*60}\n")
+    
+    for video_path in video_paths:
+        video_path = Path(video_path)
+        video_name = video_path.stem  # Filename without extension
+        
+        # Create video-specific output directory
+        video_output_dir = output_base_dir / video_name
+        video_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Process the video
+            unified = process_video_ocr(
+                video_path=video_path,
+                output_dir=video_output_dir,
+                dict_path=dict_path,
+                languages=languages,
+                num_workers=num_workers,
+                extract_frames=extract_frames,
+                frame_step=frame_step
+            )
+            results[video_name] = unified
+            print(f"✓ Successfully processed {video_name}")
+        except Exception as e:
+            print(f"✗ Error processing {video_name}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            results[video_name] = None
+    
+    print(f"\n{'='*60}")
+    print(f"BATCH PROCESSING COMPLETE")
+    print(f"Successful: {sum(1 for v in results.values() if v is not None)}/{len(video_paths)}")
+    print(f"{'='*60}\n")
+    
+    return results
+
+
+def main():
+    video_path = "all_videos/video_laet.mp4"
+    output_dir = Path("tests/video_laet")
+    dict_path = "laet.json"
+    
+    # Use the new wrapper function
+    process_video_ocr(
+        video_path=video_path,
+        output_dir=output_dir,
+        dict_path=dict_path,
+        languages=["en", "de"],
+        num_workers=4,
+        extract_frames=True,
+        frame_step=1
+    )
 
 if __name__ == "__main__":
     main()
