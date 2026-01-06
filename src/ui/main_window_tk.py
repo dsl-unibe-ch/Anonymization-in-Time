@@ -36,6 +36,10 @@ class MainWindow:
         # Transition marking state
         self.transition_start_frame = None  # Frame where transition marking started
         
+        # Mouse wheel scrolling acceleration
+        self._last_scroll_time = 0
+        self._scroll_speed = 3  # Start at 3 frames per scroll for faster initial movement
+        
         # Setup window
         self.root.title("TiT Video Annotation Viewer")
         self.root.geometry("1200x800")
@@ -194,6 +198,11 @@ class MainWindow:
         self.root.bind('<r>', lambda e: self._remove_current_transition())
         self.root.bind('<R>', lambda e: self._remove_current_transition())
         
+        # Mouse wheel scrolling
+        self.root.bind('<MouseWheel>', self._on_mouse_wheel)  # Windows/Mac
+        self.root.bind('<Button-4>', lambda e: self._go_to_previous_frame())  # Linux scroll up
+        self.root.bind('<Button-5>', lambda e: self._go_to_next_frame())  # Linux scroll down
+        
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
     
@@ -272,6 +281,29 @@ class MainWindow:
         """Handle slider value change."""
         if not self._slider_updating:  # Prevent recursion
             self._go_to_position(int(float(value)))
+    
+    def _on_mouse_wheel(self, event):
+        """Handle mouse wheel scrolling with acceleration."""
+        import time
+        
+        current_time = time.time()
+        time_since_last_scroll = current_time - self._last_scroll_time
+        
+        # If scrolling quickly (within 300ms), increase speed
+        if time_since_last_scroll < 0.3:
+            # Accelerate faster: increase by 3 frames each time, up to 30 frames per scroll
+            self._scroll_speed = min(self._scroll_speed + 3, 30)
+        else:
+            # Reset to base speed if paused
+            self._scroll_speed = 3
+        
+        self._last_scroll_time = current_time
+        
+        # event.delta is positive for scroll up, negative for scroll down
+        if event.delta > 0:
+            self._jump_frames(-self._scroll_speed)
+        else:
+            self._jump_frames(self._scroll_speed)
     
     def _on_annotation_clicked(self, annotation_id: int, frame_idx: int, is_right_click: bool = False):
         """Handle annotation click."""
