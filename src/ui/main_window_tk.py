@@ -7,6 +7,7 @@ from tkinter import ttk, messagebox, filedialog
 
 from ui.canvas_widget_tk import CanvasWidget
 from models.annotation_manager import AnnotationManager
+from models.transition_manager import TransitionManager
 
 
 class MainWindow:
@@ -26,10 +27,14 @@ class MainWindow:
         
         # Initialize managers
         self.annotation_manager = AnnotationManager(self.data_dir)
+        self.transition_manager = TransitionManager(self.data_dir)
         
         # Current frame position
         self.current_position = 0
         self._slider_updating = False  # Flag to prevent recursion
+        
+        # Transition marking state
+        self.transition_start_frame = None  # Frame where transition marking started
         
         # Setup window
         self.root.title("TiT Video Annotation Viewer")
@@ -60,6 +65,16 @@ class MainWindow:
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
         view_menu.add_command(label="Toggle Hidden Preview (H)", command=self._toggle_hidden_preview)
+        
+        # Transitions menu
+        transitions_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Transitions", menu=transitions_menu)
+        transitions_menu.add_command(label="Mark Transition Start (T)", command=self._mark_transition_start)
+        transitions_menu.add_command(label="Mark Transition End (E)", command=self._mark_transition_end)
+        transitions_menu.add_command(label="Remove Current Transition (R)", command=self._remove_current_transition)
+        transitions_menu.add_separator()
+        transitions_menu.add_command(label="Save Transitions", command=self._save_transitions)
+        transitions_menu.add_command(label="List All Transitions", command=self._list_transitions)
         
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -113,12 +128,38 @@ class MainWindow:
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X)
         
+        # Left side buttons (transitions)
+        left_buttons = ttk.Frame(button_frame)
+        left_buttons.pack(side=tk.LEFT)
+        
+        self.transition_start_button = ttk.Button(
+            left_buttons,
+            text="Mark Start (T)",
+            command=self._mark_transition_start
+        )
+        self.transition_start_button.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.transition_end_button = ttk.Button(
+            left_buttons,
+            text="Mark End (E)",
+            command=self._mark_transition_end
+        )
+        self.transition_end_button.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.remove_transition_button = ttk.Button(
+            left_buttons,
+            text="Remove (R)",
+            command=self._remove_current_transition
+        )
+        self.remove_transition_button.pack(side=tk.LEFT)
+        
+        # Right side buttons
         self.toggle_preview_button = ttk.Button(
             button_frame, 
             text="Toggle Hidden Preview (H)", 
             command=self._toggle_hidden_preview
         )
-        self.toggle_preview_button.pack(side=tk.LEFT)
+        self.toggle_preview_button.pack(side=tk.LEFT, padx=(20, 0))
         
         self.save_button = ttk.Button(button_frame, text="Save State (S)", command=self._save_state)
         self.save_button.pack(side=tk.RIGHT, padx=(5, 0))
@@ -146,6 +187,12 @@ class MainWindow:
         self.root.bind('<Control-S>', lambda e: self._save_state())
         self.root.bind('<Control-q>', lambda e: self._quit())
         self.root.bind('<Control-Q>', lambda e: self._quit())
+        self.root.bind('<t>', lambda e: self._mark_transition_start())
+        self.root.bind('<T>', lambda e: self._mark_transition_start())
+        self.root.bind('<e>', lambda e: self._mark_transition_end())
+        self.root.bind('<E>', lambda e: self._mark_transition_end())
+        self.root.bind('<r>', lambda e: self._remove_current_transition())
+        self.root.bind('<R>', lambda e: self._remove_current_transition())
         
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
@@ -173,6 +220,9 @@ class MainWindow:
                 "- data/ocr.pkl and/or data/sam3.pkl (separate)"
             )
             return
+        
+        # Load transitions
+        self.transition_manager.load_transitions()  # Non-fatal if file doesn't exist
         
         # Setup slider
         frame_count = self.annotation_manager.get_frame_count()
@@ -202,7 +252,8 @@ class MainWindow:
         frame_idx = self.annotation_manager.get_frame_index(position)
         if frame_idx is not None:
             annotations = self.annotation_manager.get_frame_annotations(frame_idx)
-            self.canvas.load_frame(frame_idx, annotations)
+            is_transition = self.transition_manager.is_in_transition(frame_idx)
+            self.canvas.load_frame(frame_idx, annotations, is_transition)
             self._update_labels(frame_idx)
     
     def _go_to_next_frame(self):
@@ -232,7 +283,8 @@ class MainWindow:
         
         # Reload frame to update display
         annotations = self.annotation_manager.get_frame_annotations(frame_idx)
-        self.canvas.load_frame(frame_idx, annotations)
+        is_transition = self.transition_manager.is_in_transition(frame_idx)
+        self.canvas.load_frame(frame_idx, annotations, is_transition)
         self._update_labels(frame_idx)
         
         # Show status
@@ -273,10 +325,17 @@ class MainWindow:
     
     def _update_labels(self, frame_idx: int):
         """Update info labels."""
-        # Frame label
+        # Frame label with transition indicator
         frame_count = self.annotation_manager.get_frame_count()
+        transition_status = ""
+        if self.transition_manager.is_in_transition(frame_idx):
+            transition = self.transition_manager.get_transition_at_frame(frame_idx)
+            transition_status = f" [TRANSITION {transition[0]}-{transition[1]}]"
+        elif self.transition_start_frame is not None:
+            transition_status = f" [Marking from {self.transition_start_frame}]"
+        
         self.frame_label.config(
-            text=f"Frame: {self.current_position + 1} / {frame_count} (Index: {frame_idx})"
+            text=f"Frame: {self.current_position + 1} / {frame_count} (Index: {frame_idx}){transition_status}"
         )
         
         # Stats label
@@ -311,7 +370,7 @@ class MainWindow:
     def _quit(self):
         """Handle quit."""
         # Check for unsaved changes
-        if self.annotation_manager.modified:
+        if self.annotation_manager.modified or self.transition_manager.modified:
             result = messagebox.askyesnocancel(
                 "Unsaved Changes",
                 "You have unsaved changes. Do you want to save before closing?"
@@ -321,5 +380,83 @@ class MainWindow:
                 return
             elif result:  # Yes, save
                 self._save_state()
+                if self.transition_manager.modified:
+                    self._save_transitions()
         
         self.root.quit()
+    
+    def _mark_transition_start(self):
+        """Mark current frame as transition start."""
+        self.transition_start_frame = self.annotation_manager.frame_indices[self.current_position]
+        self._update_labels(self.annotation_manager.frame_indices[self.current_position])
+        self._update_status(f"Marked frame {self.transition_start_frame} as transition start. Navigate to end frame and press 'E'.", timeout=5000)
+    
+    def _mark_transition_end(self):
+        """Mark current frame as transition end and create the range."""
+        if self.transition_start_frame is None:
+            messagebox.showwarning("No Start Frame", "Please mark a transition start frame first (press 'T')")
+            return
+        
+        end_frame = self.annotation_manager.frame_indices[self.current_position]
+        
+        if end_frame < self.transition_start_frame:
+            messagebox.showerror("Invalid Range", f"End frame ({end_frame}) must be >= start frame ({self.transition_start_frame})")
+            return
+        
+        # Add the transition
+        if self.transition_manager.add_transition(self.transition_start_frame, end_frame):
+            self._update_status(f"Added transition range: {self.transition_start_frame}-{end_frame}", timeout=3000)
+            self.transition_start_frame = None
+            self._update_labels(end_frame)
+        else:
+            messagebox.showerror("Error", f"Failed to add transition range {self.transition_start_frame}-{end_frame}")
+    
+    def _remove_current_transition(self):
+        """Remove the transition range containing the current frame."""
+        current_frame = self.annotation_manager.frame_indices[self.current_position]
+        
+        if self.transition_manager.remove_transition_at_frame(current_frame):
+            self._update_status(f"Removed transition at frame {current_frame}", timeout=3000)
+            self._update_labels(current_frame)
+        else:
+            messagebox.showinfo("No Transition", f"Frame {current_frame} is not in any transition range")
+    
+    def _save_transitions(self):
+        """Save transition ranges."""
+        if self.transition_manager.save_transitions():
+            messagebox.showinfo("Success", "Transitions saved successfully!")
+            self._update_status("Transitions saved", timeout=3000)
+        else:
+            messagebox.showerror("Error", "Failed to save transitions")
+    
+    def _list_transitions(self):
+        """Show a dialog listing all transitions."""
+        transitions = self.transition_manager.get_all_transitions()
+        
+        if not transitions:
+            messagebox.showinfo("Transitions", "No transitions defined")
+            return
+        
+        # Create a simple list dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Transition Ranges")
+        dialog.geometry("400x400")
+        
+        # Add scrollable listbox
+        frame = ttk.Frame(dialog)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        listbox = tk.Listbox(frame, yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        for i, (start, end) in enumerate(transitions, 1):
+            duration = end - start + 1
+            listbox.insert(tk.END, f"{i}. Frames {start}-{end} ({duration} frames)")
+        
+        # Add close button
+        close_button = ttk.Button(dialog, text="Close", command=dialog.destroy)
+        close_button.pack(pady=(0, 10))

@@ -39,6 +39,7 @@ class CanvasWidget(tk.Canvas):
         self.hovered_annotation: Optional[dict] = None
         self.show_hidden_preview = False
         self.on_annotation_clicked = on_annotation_clicked
+        self.is_transition = False  # Track if current frame is in transition
         
         # Frame cache
         self.frame_cache: Dict[int, Image.Image] = {}
@@ -55,13 +56,14 @@ class CanvasWidget(tk.Canvas):
         self.bind('<Button-3>', self._on_right_click)  # Right click
         self.bind('<Configure>', self._on_resize)
     
-    def load_frame(self, frame_idx: int, annotations: list) -> bool:
+    def load_frame(self, frame_idx: int, annotations: list, is_transition: bool = False) -> bool:
         """
         Load and display a frame with its annotations.
         
         Args:
             frame_idx: Frame index
             annotations: List of annotation dictionaries
+            is_transition: Whether this frame is in a transition range
             
         Returns:
             True if successful
@@ -69,6 +71,7 @@ class CanvasWidget(tk.Canvas):
         self.current_frame_idx = frame_idx
         self.annotations = annotations
         self.hovered_annotation = None
+        self.is_transition = is_transition
         
         # Check cache first
         if frame_idx in self.frame_cache:
@@ -147,6 +150,47 @@ class CanvasWidget(tk.Canvas):
         
         # Store original image size for mask unpacking
         self._overlay_size = img.size
+        
+        # Draw transition indicator if in transition
+        if self.is_transition:
+            # Draw thin yellow border
+            border_width = 5
+            width, height = img.size
+            # Top border
+            draw.rectangle([0, 0, width, border_width], fill=(255, 255, 0, 200))
+            # Bottom border
+            draw.rectangle([0, height - border_width, width, height], fill=(255, 255, 0, 200))
+            # Left border
+            draw.rectangle([0, 0, border_width, height], fill=(255, 255, 0, 200))
+            # Right border
+            draw.rectangle([width - border_width, 0, width, height], fill=(255, 255, 0, 200))
+            
+            # Draw text label
+            try:
+                font = ImageFont.truetype("arial.ttf", 24)
+            except:
+                font = ImageFont.load_default()
+            
+            text = "TRANSITION FRAME"
+            # Get text bbox for background
+            text_bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+            
+            # Position at top center
+            text_x = (width - text_width) // 2
+            text_y = 20
+            
+            # Draw background rectangle
+            padding = 10
+            draw.rectangle(
+                [text_x - padding, text_y - padding, 
+                 text_x + text_width + padding, text_y + text_height + padding],
+                fill=(255, 255, 0, 220)
+            )
+            
+            # Draw text
+            draw.text((text_x, text_y), text, fill=(0, 0, 0, 255), font=font)
         
         # Draw masks first (below boxes)
         for ann in self.annotations:
