@@ -27,7 +27,7 @@ class CanvasWidget(tk.Canvas):
         Args:
             parent: Parent widget
             frames_dir: Path to directory containing frame images
-            on_annotation_clicked: Callback(annotation_id, frame_idx)
+            on_annotation_clicked: Callback(annotation_id, frame_idx, shift_key=False)
         """
         super().__init__(parent, bg='black', highlightthickness=0)
         
@@ -324,7 +324,9 @@ class CanvasWidget(tk.Canvas):
         """Handle mouse click for toggling annotations."""
         if self.hovered_annotation and self.on_annotation_clicked:
             annotation_id = self.hovered_annotation.get('id')
-            self.on_annotation_clicked(annotation_id, self.current_frame_idx)
+            # Check if shift key is pressed
+            is_shift = bool(event.state & 0x0001)
+            self.on_annotation_clicked(annotation_id, self.current_frame_idx, shift_key=is_shift)
     
     def _on_resize(self, event):
         """Handle window resize."""

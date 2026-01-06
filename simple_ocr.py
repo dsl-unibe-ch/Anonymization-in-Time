@@ -1,12 +1,31 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-from ocr import process_frames_parallel
+os.environ["OMP_NUM_THREADS"] = "1"  # Limit OpenMP threads to avoid conflicts
+import warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='threadpoolctl')
+
 import pickle
 import json
 import numpy as np
 import unicodedata
 from tqdm import tqdm
 from difflib import SequenceMatcher
+import cv2
+import easyocr
+from joblib import Parallel, delayed
+
+def select_device():
+    """Select CUDA device if available, otherwise CPU."""
+    import torch
+    if torch.cuda.is_available():
+        device = 'cuda'
+        use_gpu = True
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+    else:
+        device = 'cpu'
+        use_gpu = False
+        print("CUDA not available. Using CPU.")
+    return device, use_gpu
 
 boxes_pkl_path = "tests\\ocr testvideo laet_boxes.pkl"
 frames_dir = "tests\\ocr testvideo laet_frames"
@@ -16,6 +35,223 @@ output_pkl_path = "tests\\ocr testvideo laet_final_frame_boxes.pkl"
 languages = ["en", "de"]
 num_workers = 4
 
+def get_easyocr_reader(languages):
+    """
+    Get or initialize the global EasyOCR reader.
+    
+    Returns:
+        easyocr.Reader: Initialized EasyOCR reader instance
+    """
+    device, use_gpu = select_device()
+    print("Initializing EasyOCR reader...")
+    EASYOCR_READER = easyocr.Reader(languages, gpu=use_gpu)
+    print("EasyOCR reader initialized.")
+    return EASYOCR_READER
+
+def extract_text_with_easyocr(image: np.ndarray, reader: easyocr.Reader, min_confidence: float = 0.5) -> list:
+    """
+    Extract text from an image using EasyOCR.
+    
+    Args:
+        image (np.ndarray): Input image.
+        reader (easyocr.Reader): Initialized EasyOCR reader.
+        min_confidence (float): Minimum confidence threshold for detections.
+        
+    Returns:
+        list: List of detected text with bounding boxes and confidence scores.
+    """
+    # Preprocess image for OCR and get any scale factor used during preprocessing
+    processed_image, scale_factor = preprocess_image_for_ocr(image)
+
+    # Use cleaner EasyOCR parameters to reduce oversized boxes
+    results = reader.readtext(
+        processed_image, 
+        paragraph=False,
+        # width_ths=0.6,       # Slightly tighter width merging
+        # height_ths=0.6,      # Slightly tighter height merging
+        text_threshold=0.6,  # Lower threshold to catch fainter text
+        low_text=0.35,       # Lower low_text to catch fainter text
+        # link_threshold=0.3,  # Tighter linking
+        canvas_size=2560,    # Larger canvas for better detection
+        # mag_ratio=1.0,       # Default magnification
+        adjust_contrast=0.5  # Enhance contrast for better detection
+    )
+    
+    detections = []
+    for (bbox, text, confidence) in results:
+        if confidence >= min_confidence:
+            x_coords = [point[0] for point in bbox]
+            y_coords = [point[1] for point in bbox]
+            
+            x_start = int(min(x_coords))
+            y_start = int(min(y_coords))
+            x_end = int(max(x_coords))
+            y_end = int(max(y_coords))
+
+            # If preprocessing scaled the image, map bbox back to original image coordinates
+            if scale_factor != 1:
+                try:
+                    x_start = int(round(x_start / scale_factor))
+                    y_start = int(round(y_start / scale_factor))
+                    x_end = int(round(x_end / scale_factor))
+                    y_end = int(round(y_end / scale_factor))
+                except Exception:
+                    # Fallback to original values if anything unexpected occurs
+                    pass
+            
+            detections.append({
+                'text': text.strip(),
+                'bbox': (x_start, y_start, x_end, y_end),
+                'confidence': confidence,
+                'original_bbox': (x_start, y_start, x_end, y_end)  # Keep original for reference
+            })
+    
+    return detections
+
+def preprocess_image_for_ocr(
+    image: np.ndarray,
+    upscale_threshold: int = 720,
+    noise_ratio_threshold: float = 0.85,
+    variance_threshold: float = 2000.0,
+    min_edge_strength: float = 140.0,
+) -> tuple:
+    """
+    Dual-strategy preprocessing for OCR on screen recordings:
+    - Pass A preserves edges (CLAHE + denoise + sharpen).
+    - Pass B suppresses textured backgrounds via background flattening and binarisation.
+    The function evaluates simple heuristics (edge strength vs. residual noise) and
+    chooses the variant that is most likely to yield stable OCR without destroying text.
+    """
+    if image is None:
+        return image, 1
+
+    # --- Common grayscale & optional upscale -------------------------------------------------
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image.copy()
+
+    # Invert image if it looks like a Dark Theme (dark background, light text).
+    # This converts it to "document style" (dark text, light background) which 
+    # is generally more reliable for OCR and matches the user's observation 
+    # that Light Theme works better.
+    if np.mean(gray) < 127:
+        gray = cv2.bitwise_not(gray)
+
+    h, w = gray.shape
+    scale_factor = 2 if min(h, w) < upscale_threshold else 1
+    if scale_factor != 1:
+        gray = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+
+    def compute_metrics(img: np.ndarray) -> tuple[float, float]:
+        """Return (edge_strength, residual_noise) metrics."""
+        lap = cv2.Laplacian(img, cv2.CV_64F)
+        edge_strength = float(lap.var())
+        blur = cv2.GaussianBlur(img, (5, 5), 0)
+        residual = img.astype(np.float32) - blur.astype(np.float32)
+        residual_noise = float(np.var(residual))
+        return edge_strength, residual_noise
+
+    # --- Pass A: CLAHE + denoise + sharpen ---------------------------------------------------
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    denoised = cv2.medianBlur(enhanced, 3)
+    sharpen_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+    pass_a = cv2.filter2D(denoised, -1, sharpen_kernel)
+    edge_a, noise_a = compute_metrics(pass_a)
+
+    # If the image already looks clean, return early
+    if noise_a < variance_threshold or edge_a == 0:
+        return pass_a, scale_factor
+
+    # --- Pass B: background flattening + binarisation ----------------------------------------
+    blur_bg = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
+    
+    # Use absdiff to capture text regardless of polarity (though we inverted above, this is safer)
+    # This replaces subtract(gray, blur_bg) which only worked for light-on-dark.
+    flattened = cv2.absdiff(gray, blur_bg)
+    flattened = cv2.normalize(flattened, None, 0, 255, cv2.NORM_MINMAX)
+
+    # Adaptive thresholding (Otsu) and clean-up
+    _, binary = cv2.threshold(flattened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # 'binary' now has White for text (high difference) and Black for background.
+    # We want Dark Text on Light Background to match Pass A and standard document style.
+    # So we invert it.
+    binary = cv2.bitwise_not(binary)
+
+    binary = cv2.medianBlur(binary, 3)
+    pass_b = cv2.filter2D(binary, -1, sharpen_kernel)
+    edge_b, noise_b = compute_metrics(pass_b)
+
+    # --- Selection heuristic ----------------------------------------------------------------
+    # Prefer the variant with a lower noise ratio while preserving sufficient edge strength.
+    noise_ratio = (noise_a / (edge_a + 1e-6)) if edge_a > 0 else float('inf')
+    choose_pass_b = (
+        (noise_ratio > noise_ratio_threshold and edge_b >= max(min_edge_strength, 0.55 * edge_a))
+        or (noise_b < noise_a * 0.6 and edge_b >= min_edge_strength)
+    )
+
+    if choose_pass_b and edge_b > 0:
+        return pass_b, scale_factor
+
+    return pass_a, scale_factor
+
+def process_frame(frame_path, reader, min_confidence=0.3):
+    """
+    Process a single frame to detect text boxes using EasyOCR.
+    
+    Args:
+        frame_path (str): Path to the frame image.
+
+    Returns:
+        tuple: (frame_index, detected_boxes)
+    """
+    frame = cv2.imread(frame_path)
+    if frame is None:
+        print(f"Warning: Could not read {frame_path}")
+        return None
+    
+    # Extract frame index
+    frame_name = os.path.splitext(os.path.basename(frame_path))[0]
+    frame_idx = int(''.join(filter(str.isdigit, frame_name)))
+ 
+    detections = extract_text_with_easyocr(frame, reader, min_confidence)
+
+    return frame_idx, detections
+
+def process_frames_parallel(frames_dir, languages, num_workers=-1):
+    """
+    Process frames in parallel using Joblib and save detected bounding boxes into a pickle file.
+
+    Args:
+        frames_dir (str): Directory containing the video frames.
+        languages (list): List of languages for OCR.
+        num_workers (int): Number of parallel workers (-1 uses all available CPUs).
+    """
+    # Get sorted list of frame file paths
+    frame_paths = sorted(
+        [os.path.join(frames_dir, f) for f in os.listdir(frames_dir) if f.endswith(('.jpg', '.png'))],
+        key=lambda x: int(''.join(filter(str.isdigit, os.path.basename(x))))
+    )
+    
+    total_frames = len(frame_paths)
+    
+    print(f"Found {total_frames} frames in {frames_dir}")
+    print(f"Using {num_workers if num_workers > 0 else 'all'} parallel workers.")
+
+    # Initialize EasyOCR reader
+    reader = get_easyocr_reader(languages)
+
+    # Parallel processing using Joblib
+    results = Parallel(n_jobs=num_workers, backend="loky", batch_size=5)(
+        delayed(process_frame)(frame_path, reader) for frame_path in tqdm(frame_paths, total=len(frame_paths), desc="Processing Frames")
+    )
+
+    # Filter out None results
+    results = [res for res in results if res is not None]
+
+    # Create a dictionary to store results
+    frame_boxes = {frame_idx: detections for frame_idx, detections in sorted(results)}
+
+    return frame_boxes
 
 def merge_split_names(frame_boxes, names_dict, x_threshold=50):
     """
@@ -140,7 +376,7 @@ def merge_split_names(frame_boxes, names_dict, x_threshold=50):
 def split_boxes_into_words(frame_boxes):
     """
     Split multi-word text boxes into individual word boxes.
-    Uses proportional bbox division based on character positions.
+    Uses proportional bbox division based on word lengths.
     
     Args:
         frame_boxes (dict): Dictionary of frame indices to list of boxes with text
@@ -166,57 +402,52 @@ def split_boxes_into_words(frame_boxes):
                 split_boxes.append(box)
                 continue
             
-            # Multi-word box - split it
+            # Multi-word box - split it proportionally based on word lengths
             x1, y1, x2, y2 = box['bbox']
             box_width = x2 - x1
             
-            # Find character positions for each word in the original text
-            char_positions = []
-            current_pos = 0
-            for word in words:
-                start = text.find(word, current_pos)
-                end = start + len(word)
-                char_positions.append((word, start, end))
-                current_pos = end
+            # Estimate padding (typically ~2% of box width or min 2 pixels on each side)
+            padding = max(2, int(box_width * 0.02))
             
-            # Create bbox for each word based on proportional character positions
-            # Make boxes overlap at borders to avoid gaps
-            total_chars = len(text)
+            # Calculate total characters in all words
+            total_word_chars = sum(len(word) for word in words)
+            
+            # Split the content area (box minus padding) proportionally among words
+            content_start = x1 + padding
+            content_end = x2 - padding
+            content_width = content_end - content_start
+            
+            current_x = x1  # Start from original box edge (includes padding for first word)
             word_boxes = []
             
-            for i, (word, char_start, char_end) in enumerate(char_positions):
-                # Calculate proportional x positions
-                start_ratio = char_start / total_chars
-                end_ratio = char_end / total_chars
+            for i, word in enumerate(words):
+                word_length = len(word)
                 
-                word_x1 = x1 + int(start_ratio * box_width)
-                word_x2 = x1 + int(end_ratio * box_width)
-                
-                # First word: start at box beginning
                 if i == 0:
+                    # First word: start from parent box edge (includes left padding)
                     word_x1 = x1
-                
-                # Last word: end at box end
-                if i == len(char_positions) - 1:
+                    # End at proportional position in content area
+                    word_proportion = word_length / total_word_chars
+                    word_x2 = content_start + int(word_proportion * content_width)
+                elif i == len(words) - 1:
+                    # Last word: start where previous ended, extend to parent box edge (includes right padding)
+                    word_x1 = current_x
                     word_x2 = x2
                 else:
-                    # Extend to overlap slightly with next word (avoid gaps)
-                    # Add 2 pixels to create small overlap
-                    word_x2 = min(x2, word_x2 + 2)
+                    # Middle words: split proportionally within content area
+                    word_x1 = current_x
+                    word_proportion = word_length / total_word_chars
+                    word_x2 = content_start + int(sum(len(words[j]) for j in range(i + 1)) / total_word_chars * content_width)
                 
                 word_boxes.append({
                     'bbox': (word_x1, y1, word_x2, y2),
                     'text': word,
                     'confidence': box.get('confidence', 1.0),
-                    'parent_box': box['bbox']
+                    'parent_box': box['bbox'],
+                    'parent_box_text': text  # Save full parent text for matching
                 })
-            
-            # Ensure adjacent boxes overlap: each box starts where previous ended
-            for i in range(1, len(word_boxes)):
-                prev_x2 = word_boxes[i-1]['bbox'][2]
-                curr_x1, curr_y1, curr_x2, curr_y2 = word_boxes[i]['bbox']
-                # Start current box at previous box's end (creates overlap)
-                word_boxes[i]['bbox'] = (prev_x2 - 1, curr_y1, curr_x2, curr_y2)
+                
+                current_x = word_x2
             
             split_boxes.extend(word_boxes)
         
@@ -356,10 +587,11 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
         return final_matches
     
     def merge_matched_boxes(match):
-        """Merge word boxes from a name match into single box with exact boundaries"""
+        """Merge word boxes from a name match into single box using word boundaries"""
         boxes = [box for _, box in match['boxes']]
         
-        # Calculate bounding box of all matched word boxes
+        # Use the word box boundaries from split_boxes_into_words
+        # This preserves accurate word-level splitting
         x1 = min(b['bbox'][0] for b in boxes)
         y1 = min(b['bbox'][1] for b in boxes)
         x2 = max(b['bbox'][2] for b in boxes)
@@ -367,6 +599,7 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
         
         # Get parent box if available
         parent_box = boxes[0].get('parent_box', None)
+        parent_box_text = boxes[0].get('parent_box_text', None)
         
         return {
             'bbox': (x1, y1, x2, y2),
@@ -376,6 +609,7 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
             'confidence': match['confidence'],
             'to_show': True,
             'parent_box': parent_box,
+            'parent_box_text': parent_box_text,
             'match_type': 'word_level'
         }
     
@@ -416,7 +650,7 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
     return filtered_mapping
 
 
-def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=20, size_threshold=0.3):
+def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, size_threshold=0.4):
     """
     Enhanced temporal tracking with frame-to-frame coordinate preservation.
     
@@ -424,7 +658,7 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=20, si
         frame_boxes (dict): Dictionary of frame indices to list of bounding boxes
         frame_skip (int): Frame skip interval used during detection
         max_gap (int): Maximum frame gap to interpolate across
-        position_threshold (int): Maximum pixel distance for tracking
+        position_threshold (int): Maximum pixel distance for tracking (more lenient for vertical)
         size_threshold (float): Maximum relative size difference for tracking
         
     Returns:
@@ -434,26 +668,38 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=20, si
     """
     
     def can_track(box1, box2):
-        """Check if two boxes can be tracked together"""
+        """Check if two boxes can be tracked together - prioritizes text matching"""
         bbox1, bbox2 = box1['bbox'], box2['bbox']
         
-        # Check center distance
+        # Check center positions
         center1 = ((bbox1[0] + bbox1[2]) / 2, (bbox1[1] + bbox1[3]) / 2)
         center2 = ((bbox2[0] + bbox2[2]) / 2, (bbox2[1] + bbox2[3]) / 2)
-        distance = np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
+        
+        # Separate horizontal and vertical distances
+        x_distance = abs(center1[0] - center2[0])
+        y_distance = abs(center1[1] - center2[1])
         
         # Check size similarity
         area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
         area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
         size_diff = abs(area1 - area2) / max(area1, area2) if max(area1, area2) > 0 else 0
         
-        # Check text similarity
-        text_sim = SequenceMatcher(None, box1.get('alterego', '').lower(), 
-                                 box2.get('alterego', '').lower()).ratio()
+        # Check text similarity (most important for OCR)
+        text1 = box1.get('text', '') or box1.get('alterego', '')
+        text2 = box2.get('text', '') or box2.get('alterego', '')
+        text_sim = SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
         
-        return (distance < position_threshold and 
-                size_diff < size_threshold and 
-                text_sim > 0.8)
+        # If text matches very well, be more lenient with position/size
+        if text_sim >= 0.9:
+            # Very similar text - allow larger vertical movement (e.g., scrolling chat)
+            return x_distance < position_threshold * 1.5 and y_distance < position_threshold * 2 and size_diff < size_threshold * 1.5
+        elif text_sim >= 0.75:
+            # Fairly similar text - standard thresholds
+            return x_distance < position_threshold and y_distance < position_threshold * 1.5 and size_diff < size_threshold
+        else:
+            # Low text similarity - require tighter position match
+            return x_distance < position_threshold * 0.5 and y_distance < position_threshold * 0.5 and size_diff < size_threshold * 0.8
+    
     
     def stabilize_coordinates(current_bbox, prev_bbox, movement_threshold=3):
         """
@@ -592,6 +838,11 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=20, si
             track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id
             continue
         
+        # Multi-frame track - find best text representation
+        text_variants = [(box.get('text', ''), box.get('confidence', 0)) for _, box in track]
+        # Use the text with highest confidence
+        best_text = max(text_variants, key=lambda x: x[1])[0]
+        
         # Multi-frame track - apply frame-to-frame stabilization
         for i, (frame_idx, box) in enumerate(track):
             box_idx_in_stabilized = len(stabilized_boxes[frame_idx])
@@ -599,6 +850,7 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=20, si
             if i == 0:
                 # First frame in track - keep original coordinates
                 stabilized_box = box.copy()
+                stabilized_box['text'] = best_text  # Use consistent text
             else:
                 # Stabilize based on previous frame
                 prev_frame, prev_box = track[i-1]
@@ -608,6 +860,7 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=20, si
                 
                 stabilized_box = box.copy()
                 stabilized_box['bbox'] = stabilized_bbox
+                stabilized_box['text'] = best_text  # Use consistent text
             
             stabilized_boxes[frame_idx].append(stabilized_box)
             track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id
@@ -682,6 +935,66 @@ def normalize_box_heights(frame_boxes, height_clusters=None):
     
     return normalized_boxes, height_clusters
 
+def align_boxes_on_same_line(frame_boxes, y_threshold=15):
+    """
+    Ensure boxes on the same horizontal line have identical y-coordinates.
+    
+    Args:
+        frame_boxes (dict): Dictionary of frame indices to list of boxes
+        y_threshold (int): Maximum vertical distance to consider boxes on same line
+        
+    Returns:
+        dict: Frame boxes with aligned y-coordinates
+    """
+    aligned_boxes = {}
+    
+    for frame_idx, boxes in frame_boxes.items():
+        if not boxes:
+            aligned_boxes[frame_idx] = []
+            continue
+        
+        # Group boxes by y-center
+        boxes_with_centers = [(box, (box['bbox'][1] + box['bbox'][3]) / 2) for box in boxes]
+        boxes_with_centers.sort(key=lambda x: x[1])
+        
+        lines = []
+        current_line = [boxes_with_centers[0]]
+        
+        for box, y_center in boxes_with_centers[1:]:
+            prev_y_center = current_line[-1][1]
+            
+            if abs(y_center - prev_y_center) < y_threshold:
+                current_line.append((box, y_center))
+            else:
+                lines.append(current_line)
+                current_line = [(box, y_center)]
+        
+        lines.append(current_line)
+        
+        # Align each line to median y-coordinates
+        aligned_frame_boxes = []
+        for line in lines:
+            if not line:
+                continue
+            
+            # Get median y1 and y2 for this line
+            y1_values = [box['bbox'][1] for box, _ in line]
+            y2_values = [box['bbox'][3] for box, _ in line]
+            
+            median_y1 = int(np.median(y1_values))
+            median_y2 = int(np.median(y2_values))
+            
+            # Apply to all boxes on this line
+            for box, _ in line:
+                aligned_box = box.copy()
+                x1, _, x2, _ = box['bbox']
+                aligned_box['bbox'] = (x1, median_y1, x2, median_y2)
+                aligned_frame_boxes.append(aligned_box)
+        
+        aligned_boxes[frame_idx] = aligned_frame_boxes
+    
+    return aligned_boxes
+
 def ocr_boxes_to_unified(frame_boxes, tracks=None):
     """
     Convert OCR box mapping to unified format:
@@ -744,20 +1057,25 @@ except:
     print(f"Saved detected text boxes to {boxes_pkl_path}")
 
 frame_boxes = merge_split_names(frame_boxes, names_to_detect)
-frame_boxes = split_boxes_into_words(frame_boxes)
-filtered_frame_boxes = filter_boxes_by_names(frame_boxes, names_to_detect)
 
-enhanced_boxes, ocr_tracks = enhanced_temporal_tracking(
-    filtered_frame_boxes,
+# Normalize box heights first for easier tracking
+normalized_boxes, height_clusters = normalize_box_heights(frame_boxes)
+
+# Track and stabilize normalized boxes with more lenient thresholds
+tracked_boxes, ocr_tracks = enhanced_temporal_tracking(
+    normalized_boxes,
     max_gap=6,
-    position_threshold=20,
-    size_threshold=0.3
+    position_threshold=50,  # More lenient for vertical movement
+    size_threshold=0.4      # More lenient for size changes
 )
 
-# Normalize box heights for consistency
-enhanced_boxes, height_clusters = normalize_box_heights(enhanced_boxes)
+# Split tracked boxes into words
+frame_boxes = split_boxes_into_words(tracked_boxes)
 
-unified = ocr_boxes_to_unified(enhanced_boxes, tracks=ocr_tracks)
+# Filter by names (merges word boxes back into name boxes)
+filtered_frame_boxes = filter_boxes_by_names(frame_boxes, names_to_detect)
+
+unified = ocr_boxes_to_unified(filtered_frame_boxes, tracks=ocr_tracks)
 with open(output_pkl_path, 'wb') as f:
     pickle.dump(unified, f)
 

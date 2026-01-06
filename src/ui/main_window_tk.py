@@ -222,10 +222,13 @@ class MainWindow:
         if not self._slider_updating:  # Prevent recursion
             self._go_to_position(int(float(value)))
     
-    def _on_annotation_clicked(self, annotation_id: int, frame_idx: int):
+    def _on_annotation_clicked(self, annotation_id: int, frame_idx: int, shift_key: bool = False):
         """Handle annotation click."""
-        # Toggle annotation
-        new_state = self.annotation_manager.toggle_annotation(annotation_id, frame_idx)
+        # Toggle annotation or parent box based on shift key
+        if shift_key:
+            new_state = self.annotation_manager.toggle_parent_box(annotation_id, frame_idx)
+        else:
+            new_state = self.annotation_manager.toggle_annotation(annotation_id, frame_idx)
         
         # Reload frame to update display
         annotations = self.annotation_manager.get_frame_annotations(frame_idx)
@@ -234,7 +237,8 @@ class MainWindow:
         
         # Show status
         state_str = "visible" if new_state else "hidden"
-        self._update_status(f"Annotation {annotation_id} is now {state_str}", timeout=2000)
+        action = "Parent box" if shift_key else "Annotation"
+        self._update_status(f"{action} {annotation_id} is now {state_str}", timeout=2000)
     
     def _toggle_hidden_preview(self):
         """Toggle preview mode for hidden annotations."""

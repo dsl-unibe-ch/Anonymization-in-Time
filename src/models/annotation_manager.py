@@ -133,6 +133,80 @@ class AnnotationManager:
         
         return new_state
     
+    def toggle_parent_box(self, annotation_id: int, frame_idx: int) -> bool:
+        """
+        Toggle the visibility of all annotations that share the same parent_box
+        as the clicked annotation, propagating across all frames.
+        Uses fuzzy position matching on parent_box coordinates.
+        
+        Args:
+            annotation_id: Unique annotation ID of clicked annotation
+            frame_idx: Frame index where click occurred
+            
+        Returns:
+            New to_show state
+        """
+        annotations = self.frames.get(frame_idx, [])
+        
+        # Find the clicked annotation and get its parent_box
+        target_ann = None
+        for ann in annotations:
+            if ann.get('id') == annotation_id:
+                target_ann = ann
+                break
+        
+        if not target_ann:
+            return False
+        
+        parent_box = target_ann.get('parent_box')
+        parent_box_text = target_ann.get('parent_box_text', '')
+        
+        if parent_box is None:
+            # No parent box - fall back to regular toggle
+            return self.toggle_annotation(annotation_id, frame_idx)
+        
+        # Determine new state from the clicked annotation
+        new_state = not target_ann['to_show']
+        self.modified = True
+        
+        def parent_boxes_match(pb1, pb2, text1, text2, threshold=30):
+            """Check if two parent boxes are similar enough to be considered the same."""
+            if pb1 is None or pb2 is None:
+                return False
+            
+            # First check text - must match exactly (text is stabilized)
+            if text1 and text2:
+                if text1.lower() != text2.lower():
+                    return False
+            
+            # Check position similarity (center point)
+            x1_center = (pb1[0] + pb1[2]) / 2
+            y1_center = (pb1[1] + pb1[3]) / 2
+            x2_center = (pb2[0] + pb2[2]) / 2
+            y2_center = (pb2[1] + pb2[3]) / 2
+            
+            x_dist = abs(x1_center - x2_center)
+            y_dist = abs(y1_center - y2_center)
+            
+            # More lenient on vertical movement (chat scrolling)
+            return x_dist < threshold and y_dist < threshold * 2
+        
+        # Toggle all annotations across all frames that have similar parent_box
+        toggled_count = 0
+        for frame_idx_iter, frame_annotations in self.frames.items():
+            for ann in frame_annotations:
+                ann_parent = ann.get('parent_box')
+                ann_parent_text = ann.get('parent_box_text', '')
+                
+                # Check if this annotation has a similar parent_box
+                if parent_boxes_match(parent_box, ann_parent, parent_box_text, ann_parent_text):
+                    ann['to_show'] = new_state
+                    toggled_count += 1
+        
+        print(f"Toggled {toggled_count} annotations with matching parent_box across all frames")
+        
+        return new_state
+    
     def get_annotation_by_id(self, annotation_id: int, frame_idx: int) -> Optional[dict]:
         """
         Get annotation by ID.
