@@ -1,11 +1,17 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from ocr import process_frames_parallel
 import pickle
 import json
+import numpy as np
+import unicodedata
+from tqdm import tqdm
+from difflib import SequenceMatcher
 
-boxes_pkl_path = "data/frame_boxes.pkl"
-frames_dir = "data/frames"
+boxes_pkl_path = "tests\\ocr testvideo laet_boxes.pkl"
+frames_dir = "tests\\ocr testvideo laet_frames"
 dict_path = "laet.json"
-output_pkl_path = "data/final_frame_boxes.pkl"
+output_pkl_path = "tests\\ocr testvideo laet_final_frame_boxes.pkl"
 
 languages = ["en", "de"]
 num_workers = 4
@@ -131,223 +137,281 @@ def merge_split_names(frame_boxes, names_dict, x_threshold=50):
         
     return merged_frame_boxes
 
-def filter_boxes_by_names(frame_boxes, names, similarity_threshold=0.7):
+def split_boxes_into_words(frame_boxes):
     """
-    Annotate boxes with match info instead of dropping non-matches.
-    Boxes that match a name are marked with to_show=True and use a sub-bbox around the match.
-    Non-matching boxes are kept with to_show=False.
+    Split multi-word text boxes into individual word boxes.
+    Uses proportional bbox division based on character positions.
+    
+    Args:
+        frame_boxes (dict): Dictionary of frame indices to list of boxes with text
+        
+    Returns:
+        dict: Frame boxes where each box represents a single word
     """
+    import numpy as np
+    
+    split_frame_boxes = {}
+    
+    for frame_idx, boxes in frame_boxes.items():
+        split_boxes = []
+        
+        for box in boxes:
+            text = box.get('text', '').strip()
+            if not text:
+                continue
+            
+            words = text.split()
+            if len(words) <= 1:
+                # Single word or empty - keep as is
+                split_boxes.append(box)
+                continue
+            
+            # Multi-word box - split it
+            x1, y1, x2, y2 = box['bbox']
+            box_width = x2 - x1
+            
+            # Find character positions for each word in the original text
+            char_positions = []
+            current_pos = 0
+            for word in words:
+                start = text.find(word, current_pos)
+                end = start + len(word)
+                char_positions.append((word, start, end))
+                current_pos = end
+            
+            # Create bbox for each word based on proportional character positions
+            # Make boxes overlap at borders to avoid gaps
+            total_chars = len(text)
+            word_boxes = []
+            
+            for i, (word, char_start, char_end) in enumerate(char_positions):
+                # Calculate proportional x positions
+                start_ratio = char_start / total_chars
+                end_ratio = char_end / total_chars
+                
+                word_x1 = x1 + int(start_ratio * box_width)
+                word_x2 = x1 + int(end_ratio * box_width)
+                
+                # First word: start at box beginning
+                if i == 0:
+                    word_x1 = x1
+                
+                # Last word: end at box end
+                if i == len(char_positions) - 1:
+                    word_x2 = x2
+                else:
+                    # Extend to overlap slightly with next word (avoid gaps)
+                    # Add 2 pixels to create small overlap
+                    word_x2 = min(x2, word_x2 + 2)
+                
+                word_boxes.append({
+                    'bbox': (word_x1, y1, word_x2, y2),
+                    'text': word,
+                    'confidence': box.get('confidence', 1.0),
+                    'parent_box': box['bbox']
+                })
+            
+            # Ensure adjacent boxes overlap: each box starts where previous ended
+            for i in range(1, len(word_boxes)):
+                prev_x2 = word_boxes[i-1]['bbox'][2]
+                curr_x1, curr_y1, curr_x2, curr_y2 = word_boxes[i]['bbox']
+                # Start current box at previous box's end (creates overlap)
+                word_boxes[i]['bbox'] = (prev_x2 - 1, curr_y1, curr_x2, curr_y2)
+            
+            split_boxes.extend(word_boxes)
+        
+        split_frame_boxes[frame_idx] = split_boxes
+    
+    return split_frame_boxes
+
+def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
+    """
+    Match word-level boxes against dictionary names.
+    Uses actual word boxes from split_boxes_into_words - no character estimation.
+    Merges adjacent matching words for multi-word names.
+    
+    Args:
+        frame_boxes (dict): Word-level boxes from split_boxes_into_words
+        names_dict (dict): Dictionary of names to alteregos
+        similarity_threshold (float): Fuzzy match threshold
+        
+    Returns:
+        dict: Filtered boxes with matched names
+    """
+    import re
     
     def normalize_text(text):
-        """Normalize text for better matching - removes accents, standardizes case"""
+        """Normalize text for matching"""
         if not text:
             return ""
         text = unicodedata.normalize('NFD', text)
         text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
         return text.lower().strip()
     
-    def calculate_word_similarity(text1, text2):
-        """Calculate similarity between two texts, handling word-level differences"""
-        norm_text1, norm_text2 = normalize_text(text1), normalize_text(text2)
-        direct_sim = SequenceMatcher(None, norm_text1, norm_text2).ratio()
+    def word_matches_name_part(word_text, name_part):
+        """Check if word matches a part of a name"""
+        norm_word = normalize_text(word_text)
+        norm_name = normalize_text(name_part)
         
-        words1, words2 = norm_text1.split(), norm_text2.split()
-        if len(words1) <= 1 and len(words2) <= 1:
-            return direct_sim
+        # Exact match
+        if norm_word == norm_name:
+            return True, 1.0
         
-        word_similarities = []
-        for word1 in words1:
-            best_sim = max(SequenceMatcher(None, word1, word2).ratio() for word2 in words2)
-            word_similarities.append(best_sim)
-        
-        word_avg_sim = sum(word_similarities) / len(word_similarities) if word_similarities else 0
-        return max(direct_sim, word_avg_sim)
+        # Fuzzy match
+        similarity = SequenceMatcher(None, norm_word, norm_name).ratio()
+        if similarity >= similarity_threshold:
+            return True, similarity
+            
+        return False, 0.0
     
-    def find_exact_matches(text, name, norm_text, norm_name):
-        """Find exact matches using word boundaries and normalization"""
+    def group_boxes_into_lines(boxes):
+        """Group boxes on same horizontal line"""
+        if not boxes:
+            return []
+        
+        # Sort by y-position
+        sorted_boxes = sorted(enumerate(boxes), key=lambda x: (x[1]['bbox'][1] + x[1]['bbox'][3]) / 2)
+        
+        lines = []
+        current_line = [sorted_boxes[0]]
+        
+        for idx, box in sorted_boxes[1:]:
+            prev_y_center = (current_line[-1][1]['bbox'][1] + current_line[-1][1]['bbox'][3]) / 2
+            curr_y_center = (box['bbox'][1] + box['bbox'][3]) / 2
+            
+            # Same line if y-centers within 15 pixels
+            if abs(curr_y_center - prev_y_center) < 15:
+                current_line.append((idx, box))
+            else:
+                lines.append(current_line)
+                current_line = [(idx, box)]
+        
+        lines.append(current_line)
+        
+        # Sort each line by x-position (left to right)
+        for line in lines:
+            line.sort(key=lambda x: x[1]['bbox'][0])
+        
+        return lines
+    
+    def find_name_sequences(line_boxes, names_dict):
+        """Find sequences of adjacent word boxes that match names"""
         matches = []
         
-        # Method 1: Exact word boundary match
-        pattern = r'\b' + re.escape(name.lower().strip()) + r'\b'
-        for match in re.finditer(pattern, text.lower().strip()):
-            matches.append({
-                'name': name, 'start': match.start(), 'end': match.end(),
-                'match_type': 'exact_word', 'confidence': 1.0
-            })
-        
-        # Method 2: Normalized exact match
-        if not matches and norm_name in norm_text:
-            start_pos = norm_text.find(norm_name)
-            matches.append({
-                'name': name, 'start': start_pos, 'end': start_pos + len(norm_name),
-                'match_type': 'normalized_exact', 'confidence': 0.95
-            })
-        
-        return matches
-    
-    def find_fuzzy_matches(text, name, norm_text, norm_name):
-        """Find fuzzy matches for multi-word names and similar text"""
-        matches = []
-        name_words = norm_name.split()
-        
-        # Method 3: Multi-word fuzzy matching
-        if len(name_words) > 1:
-            word_positions = []
-            for word in name_words:
-                if word in norm_text:
-                    word_positions.append(norm_text.find(word))
-                else:
-                    # Try fuzzy matching for individual words
-                    text_words = norm_text.split()
-                    best_pos = -1
-                    best_sim = 0
+        for name, alterego in names_dict.items():
+            name_words = normalize_text(name).split()
+            
+            # Try to find this name in the line
+            for start_idx in range(len(line_boxes)):
+                matched_boxes = []
+                confidence_scores = []
+                
+                box_idx = start_idx
+                word_idx = 0
+                
+                while word_idx < len(name_words) and box_idx < len(line_boxes):
+                    orig_idx, box = line_boxes[box_idx]
+                    box_text = box.get('text', '').strip()
                     
-                    for text_word in text_words:
-                        sim = SequenceMatcher(None, word, text_word).ratio()
-                        if sim > best_sim and sim >= 0.6:
-                            best_sim = sim
-                            best_pos = norm_text.find(text_word)
+                    if not box_text:
+                        box_idx += 1
+                        continue
                     
-                    if best_pos != -1:
-                        word_positions.append(best_pos)
+                    is_match, conf = word_matches_name_part(box_text, name_words[word_idx])
+                    
+                    if is_match:
+                        matched_boxes.append((orig_idx, box))
+                        confidence_scores.append(conf)
+                        word_idx += 1
+                        box_idx += 1
                     else:
+                        # No match - break this attempt
                         break
-            else:  # All words found
-                start_pos = min(word_positions)
-                end_pos = min(start_pos + len(norm_name), len(norm_text))
-                matches.append({
-                    'name': name, 'start': start_pos, 'end': end_pos,
-                    'match_type': 'multi_word_fuzzy', 'confidence': 0.8
-                })
+                
+                # Check if we matched all words in the name
+                if word_idx == len(name_words):
+                    avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0
+                    matches.append({
+                        'name': name,
+                        'alterego': alterego,
+                        'boxes': matched_boxes,
+                        'confidence': avg_confidence
+                    })
         
-        # Method 4: Simple substring match
-        elif norm_name in norm_text:
-            start_pos = norm_text.find(norm_name)
-            matches.append({
-                'name': name, 'start': start_pos, 'end': start_pos + len(norm_name),
-                'match_type': 'substring', 'confidence': 0.8
-            })
-        
-        # Method 5: Overall fuzzy matching
-        else:
-            similarity = calculate_word_similarity(text, name)
-            if similarity >= similarity_threshold:
-                matches.append({
-                    'name': name, 'start': 0, 'end': len(text),
-                    'match_type': 'fuzzy_overall', 'confidence': similarity
-                })
-        
-        return matches
-    
-    def find_name_positions_in_text(text, name_list):
-        """Find all occurrences of names in the text and return their positions"""
-        if not text:
+        # Remove overlapping matches, keep higher confidence ones
+        if not matches:
             return []
         
-        text_lower = text.lower().strip()
-        norm_text = normalize_text(text)
-        all_matches = []
-        
-        for name in name_list:
-            norm_name = normalize_text(name)
-            
-            # Try exact matches first
-            matches = find_exact_matches(text_lower, name, norm_text, norm_name)
-            
-            # If no exact matches, try fuzzy matching
-            if not matches:
-                matches = find_fuzzy_matches(text, name, norm_text, norm_name)
-            
-            all_matches.extend(matches)
-        
-        # Remove overlapping matches, keeping longer/higher confidence ones
-        if not all_matches:
-            return []
-            
-        # Sort by length (descending) then confidence (descending)
-        # This prioritizes "Mario Rossi" over "Mario"
-        all_matches.sort(key=lambda x: (x['end'] - x['start'], x['confidence']), reverse=True)
+        matches.sort(key=lambda x: (len(x['boxes']), x['confidence']), reverse=True)
         
         final_matches = []
-        for match in all_matches:
-            is_overlapping = False
-            for kept in final_matches:
-                # Check for overlap
-                if (match['start'] < kept['end'] and match['end'] > kept['start']):
-                    is_overlapping = True
-                    break
-            
-            if not is_overlapping:
+        used_indices = set()
+        
+        for match in matches:
+            box_indices = {idx for idx, _ in match['boxes']}
+            if not box_indices.intersection(used_indices):
                 final_matches.append(match)
-                
+                used_indices.update(box_indices)
+        
         return final_matches
     
-    def calculate_char_positions_to_pixels(bbox, text, char_start, char_end):
-        """Convert character positions to pixel coordinates within a bounding box"""
-        x1, y1, x2, y2 = bbox
-        box_width, box_height = x2 - x1, y2 - y1
+    def merge_matched_boxes(match):
+        """Merge word boxes from a name match into single box with exact boundaries"""
+        boxes = [box for _, box in match['boxes']]
         
-        if len(text) == 0:
-            return bbox
+        # Calculate bounding box of all matched word boxes
+        x1 = min(b['bbox'][0] for b in boxes)
+        y1 = min(b['bbox'][1] for b in boxes)
+        x2 = max(b['bbox'][2] for b in boxes)
+        y2 = max(b['bbox'][3] for b in boxes)
         
-        # Calculate pixel positions with padding
-        char_width = box_width / len(text)
-        padding_x = max(3, int(char_width * 0.15))
-        padding_y = max(3, int(box_height * 0.15))
+        # Get parent box if available
+        parent_box = boxes[0].get('parent_box', None)
         
-        sub_x1 = max(x1, x1 + int(char_start * char_width) - padding_x)
-        sub_x2 = min(x2, x1 + int(char_end * char_width) + padding_x)
-        sub_y1 = max(y1, y1 - padding_y)
-        sub_y2 = min(y2, y2 + padding_y)
-        
-        return (sub_x1, sub_y1, sub_x2, sub_y2)
-    
-    def process_frame_boxes(frame_id, boxes, names):
-        """Process boxes for a single frame"""
-        frame_results = []
-        
-        for box_info in boxes:
-            text = box_info.get('text', '')
-            if not text:
-                # Keep empty text boxes but mark as not to show
-                box_copy = box_info.copy()
-                box_copy['to_show'] = False
-                frame_results.append(box_copy)
-                continue
-            
-            name_matches = find_name_positions_in_text(text, list(names.keys()))
-            
-            if name_matches:
-                for match in name_matches:
-                    sub_bbox = calculate_char_positions_to_pixels(
-                        box_info['bbox'], text, match['start'], match['end']
-                    )
-                    
-                    frame_results.append({
-                        'name': match['name'],
-                        'alterego': names[match['name']],
-                        'text': text,
-                        'char_start': match['start'],
-                        'char_end': match['end'],
-                        'bbox': sub_bbox,
-                        'match_type': match['match_type'],
-                        'confidence': match['confidence'],
-                        'to_show': True,
-                        'parent_box': box_info.get('bbox')
-                    })
-            else:
-                box_copy = box_info.copy()
-                box_copy['to_show'] = False
-                frame_results.append(box_copy)
-        
-        return frame_results
+        return {
+            'bbox': (x1, y1, x2, y2),
+            'text': ' '.join(b.get('text', '') for b in boxes),
+            'name': match['name'],
+            'alterego': match['alterego'],
+            'confidence': match['confidence'],
+            'to_show': True,
+            'parent_box': parent_box,
+            'match_type': 'word_level'
+        }
     
     # Main processing
     filtered_mapping = {}
     
-    for frame_id, boxes in tqdm(frame_boxes.items(), desc="Filtering Boxes", unit="frame"):
-        frame_results = process_frame_boxes(frame_id, boxes, names)
-        filtered_mapping[frame_id] = frame_results
+    for frame_idx, boxes in tqdm(frame_boxes.items(), desc="Matching word boxes to names", unit="frame"):
+        if not boxes:
+            filtered_mapping[frame_idx] = []
+            continue
+        
+        # Group boxes into lines
+        lines = group_boxes_into_lines(boxes)
+        
+        frame_results = []
+        all_matched_indices = set()
+        
+        # Process each line
+        for line in lines:
+            matches = find_name_sequences(line, names_dict)
+            
+            for match in matches:
+                merged_box = merge_matched_boxes(match)
+                frame_results.append(merged_box)
+                
+                # Track which original word boxes were matched
+                all_matched_indices.update(idx for idx, _ in match['boxes'])
+        
+        # Add unmatched word boxes as to_show=False
+        for i, box in enumerate(boxes):
+            if i not in all_matched_indices:
+                box_copy = box.copy()
+                box_copy['to_show'] = False
+                frame_results.append(box_copy)
+        
+        filtered_mapping[frame_idx] = frame_results
     
     return filtered_mapping
 
@@ -680,6 +744,7 @@ except:
     print(f"Saved detected text boxes to {boxes_pkl_path}")
 
 frame_boxes = merge_split_names(frame_boxes, names_to_detect)
+frame_boxes = split_boxes_into_words(frame_boxes)
 filtered_frame_boxes = filter_boxes_by_names(frame_boxes, names_to_detect)
 
 enhanced_boxes, ocr_tracks = enhanced_temporal_tracking(

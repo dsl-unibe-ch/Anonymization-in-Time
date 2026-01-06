@@ -255,7 +255,7 @@ class CanvasWidget(tk.Canvas):
             color = self.COLOR_SAM_VISIBLE if is_visible else self.COLOR_SAM_HIDDEN
         
         # Width
-        width = 3 if is_hovered else 2
+        width = 2 if is_hovered else 1
         
         # Draw rectangle
         if not is_visible:
@@ -267,8 +267,7 @@ class CanvasWidget(tk.Canvas):
         # Draw text for OCR
         if ann.get('source') == 'ocr' and ann.get('text') and is_visible:
             text = ann.get('text', '')
-            score = ann.get('score', 0)
-            label = f"{text} ({score:.2f})"
+            label = text
             
             try:
                 font = ImageFont.truetype("arial.ttf", 12)
