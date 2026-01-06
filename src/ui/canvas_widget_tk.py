@@ -27,7 +27,7 @@ class CanvasWidget(tk.Canvas):
         Args:
             parent: Parent widget
             frames_dir: Path to directory containing frame images
-            on_annotation_clicked: Callback(annotation_id, frame_idx, shift_key=False)
+            on_annotation_clicked: Callback(annotation_id, frame_idx, is_right_click=False)
         """
         super().__init__(parent, bg='black', highlightthickness=0)
         
@@ -51,7 +51,8 @@ class CanvasWidget(tk.Canvas):
         
         # Bind mouse events
         self.bind('<Motion>', self._on_mouse_move)
-        self.bind('<Button-1>', self._on_mouse_click)
+        self.bind('<Button-1>', self._on_mouse_click)  # Left click
+        self.bind('<Button-3>', self._on_right_click)  # Right click
         self.bind('<Configure>', self._on_resize)
     
     def load_frame(self, frame_idx: int, annotations: list) -> bool:
@@ -321,12 +322,16 @@ class CanvasWidget(tk.Canvas):
             self.config(cursor='hand2' if hovered else 'arrow')
     
     def _on_mouse_click(self, event):
-        """Handle mouse click for toggling annotations."""
+        """Handle left mouse click for toggling annotations."""
         if self.hovered_annotation and self.on_annotation_clicked:
             annotation_id = self.hovered_annotation.get('id')
-            # Check if shift key is pressed
-            is_shift = bool(event.state & 0x0001)
-            self.on_annotation_clicked(annotation_id, self.current_frame_idx, shift_key=is_shift)
+            self.on_annotation_clicked(annotation_id, self.current_frame_idx, is_right_click=False)
+    
+    def _on_right_click(self, event):
+        """Handle right mouse click for toggling parent boxes."""
+        if self.hovered_annotation and self.on_annotation_clicked:
+            annotation_id = self.hovered_annotation.get('id')
+            self.on_annotation_clicked(annotation_id, self.current_frame_idx, is_right_click=True)
     
     def _on_resize(self, event):
         """Handle window resize."""
