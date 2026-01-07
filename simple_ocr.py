@@ -439,7 +439,8 @@ def split_boxes_into_words(frame_boxes):
                     'text': word,
                     'confidence': box.get('confidence', 1.0),
                     'parent_box': box['bbox'],
-                    'parent_box_text': text  # Save full parent text for matching
+                    'parent_box_text': text,  # Save full parent text for matching
+                    'track_id': box.get('track_id', None)  # Preserve track_id from parent
                 })
                 
                 current_x = word_x2
@@ -856,6 +857,7 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
                 stabilized_box = box.copy()
                 stabilized_box['bbox'] = stabilized_bbox
                 stabilized_box['text'] = best_text  # Use consistent text
+                stabilized_box['track_id'] = track_id  # Assign track_id directly to box
             
             stabilized_boxes[frame_idx].append(stabilized_box)
             track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id

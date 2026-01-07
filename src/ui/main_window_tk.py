@@ -450,6 +450,8 @@ class MainWindow:
         if self.transition_manager.remove_transition_at_frame(current_frame):
             self._update_status(f"Removed transition at frame {current_frame}", timeout=3000)
             self._update_labels(current_frame)
+            # Reload the frame to remove the transition visual indicator
+            self._go_to_position(self.current_position)
         else:
             messagebox.showinfo("No Transition", f"Frame {current_frame} is not in any transition range")
     

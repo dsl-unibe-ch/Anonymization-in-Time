@@ -679,7 +679,7 @@ def process_video_sam3(frames_folder, output_folder, text_prompt="profile image,
             
             try:
                 results = process_batch(model, datapoints, image_ids, postprocessor, device)
-                results = slim_batch_results(results, pad=10, pack_bits=False)
+                results = slim_batch_results(results, pad=10, pack_bits=True)
                 for img_path, img_id in zip(batch_files, image_ids):
                     frame_idx = len(all_results)
                     all_results.append((frame_idx, results.get(img_id, {}), img_path))
@@ -931,7 +931,7 @@ def main():
             # Process batch
             try:
                 results = process_batch(model, datapoints, image_ids, postprocessor, args.device)
-                results = slim_batch_results(results, pad=10, pack_bits=False)
+                results = slim_batch_results(results, pad=10, pack_bits=True)
                 for img_path, img_id in zip(batch_files, image_ids):
                     frame_idx = len(all_results)
                     all_results.append((frame_idx, results.get(img_id, {}), img_path))
