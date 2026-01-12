@@ -63,6 +63,8 @@ class MainWindow:
         file_menu.add_command(label="Save State (Ctrl+S)", command=self._save_state)
         file_menu.add_command(label="Export Visibility", command=self._export_visibility)
         file_menu.add_separator()
+        file_menu.add_command(label="Export Anonymized Video...", command=self._export_video)
+        file_menu.add_separator()
         file_menu.add_command(label="Quit (Ctrl+Q)", command=self._quit)
         
         # View menu
@@ -354,6 +356,112 @@ class MainWindow:
                 self._update_status("Visibility exported", timeout=3000)
             else:
                 messagebox.showerror("Error", "Failed to export visibility state")
+    
+    def _export_video(self):
+        """Export anonymized video with blurring applied."""
+        from tkinter import simpledialog
+        import subprocess
+        import sys
+        
+        # Ask for output file path
+        output_path = filedialog.asksaveasfilename(
+            title="Export Anonymized Video",
+            initialdir=str(self.data_dir.parent),
+            initialfile=f"{self.data_dir.name}_anonymized.mp4",
+            defaultextension=".mp4",
+            filetypes=[("MP4 Video", "*.mp4"), ("AVI Video", "*.avi"), ("All Files", "*.*")]
+        )
+        
+        if not output_path:
+            return
+        
+        # Ask for blur strength
+        blur_strength = simpledialog.askinteger(
+            "Blur Strength",
+            "Enter blur kernel size (must be odd number):",
+            initialvalue=51,
+            minvalue=3,
+            maxvalue=201
+        )
+        
+        if blur_strength is None:
+            return
+        
+        # Make sure it's odd
+        if blur_strength % 2 == 0:
+            blur_strength += 1
+        
+        # Save current state before exporting
+        self._save_state()
+        
+        # Prepare export script path
+        export_script = Path(__file__).parent.parent.parent / "export_video.py"
+        
+        if not export_script.exists():
+            messagebox.showerror(
+                "Export Script Not Found",
+                f"Export script not found at:\n{export_script}"
+            )
+            return
+        
+        # Show info dialog
+        response = messagebox.askyesno(
+            "Export Video",
+            f"This will export an anonymized video with:\n\n" +
+            f"• OCR boxes blurred (visible ones only)\n" +
+            f"• SAM3 masks blurred (visible ones only)\n" +
+            f"• Transition frames fully blurred\n" +
+            f"• Blur strength: {blur_strength}\n\n" +
+            f"Output: {Path(output_path).name}\n\n" +
+            f"This may take several minutes. Continue?",
+            icon='question'
+        )
+        
+        if not response:
+            return
+        
+        try:
+            # Run export script and capture output
+            self._update_status("Exporting video... please wait")
+            
+            # Run in subprocess and capture output
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(export_script),
+                    "--video_dir", str(self.data_dir),
+                    "--output", output_path,
+                    "--blur_strength", str(blur_strength)
+                ],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            
+            if result.returncode == 0:
+                messagebox.showinfo(
+                    "Export Complete",
+                    f"Video exported successfully!\n\n" +
+                    f"Output: {output_path}"
+                )
+                self._update_status("Video export completed", timeout=3000)
+            else:
+                # Show error details
+                error_msg = result.stderr if result.stderr else result.stdout
+                messagebox.showerror(
+                    "Export Failed",
+                    f"Export failed with error:\n\n{error_msg[:500]}"
+                )
+                self._update_status("Export failed", timeout=3000)
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            messagebox.showerror(
+                "Export Error", 
+                f"Failed to start export:\n{str(e)}\n\n{error_details[:500]}"
+            )
+            self._update_status("Export failed", timeout=3000)
     
     def _update_labels(self, frame_idx: int):
         """Update info labels."""
