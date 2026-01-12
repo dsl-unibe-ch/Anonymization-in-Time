@@ -4,6 +4,7 @@ Canvas Widget - displays frames with annotation overlays and handles interaction
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 import numpy as np
+import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 import tkinter as tk
 
@@ -38,6 +39,7 @@ class CanvasWidget(tk.Canvas):
         self.annotations: list = []
         self.hovered_annotation: Optional[dict] = None
         self.show_hidden_preview = False
+        self.preview_mode = False  # Blur preview mode
         self.on_annotation_clicked = on_annotation_clicked
         self.is_transition = False  # Track if current frame is in transition
         
@@ -131,10 +133,16 @@ class CanvasWidget(tk.Canvas):
         
         # Create display image with overlays
         display_img = self.current_image.copy()
+        
+        # Apply blur preview if enabled
+        if self.preview_mode:
+            display_img = self._apply_blur_preview(display_img)
+        
         display_img = display_img.resize((display_width, display_height), Image.Resampling.LANCZOS)
         
-        # Draw overlays
-        display_img = self._draw_overlays(display_img)
+        # Draw overlays (only if not in preview mode)
+        if not self.preview_mode:
+            display_img = self._draw_overlays(display_img)
         
         # Convert to PhotoImage
         self.display_image = ImageTk.PhotoImage(display_img)
@@ -431,9 +439,166 @@ class CanvasWidget(tk.Canvas):
         
         return None
     
+    def _apply_blur_preview(self, img: Image.Image) -> Image.Image:
+        """Apply blur and text replacement preview to visible annotations."""
+        # Convert PIL to OpenCV format
+        cv_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        height, width = cv_img.shape[:2]
+        
+        # Create blur mask
+        blur_mask = np.zeros((height, width), dtype=bool)
+        
+        # Store OCR boxes with text replacements
+        ocr_text_overlays = []
+        
+        # Process visible annotations
+        for ann in self.annotations:
+            if not ann.get('to_show', True):
+                continue
+            
+            bbox = ann.get('bbox')
+            if not bbox:
+                continue
+            
+            x1, y1, x2, y2 = bbox
+            x1 = max(0, min(x1, width))
+            x2 = max(0, min(x2, width))
+            y1 = max(0, min(y1, height))
+            y2 = max(0, min(y2, height))
+            
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
+            # For OCR, save original patch
+            if ann.get('source') == 'ocr':
+                original_patch = cv_img[y1:y2, x1:x2].copy()
+                ocr_text_overlays.append((ann, original_patch, x1, y1, x2, y2))
+                blur_mask[y1:y2, x1:x2] = True
+            
+            # For SAM3, use mask
+            elif ann.get('source') == 'sam3':
+                mask_data = ann.get('mask')
+                if mask_data is not None:
+                    try:
+                        from utils.mask_utils import rebuild_full_mask
+                        full_mask = rebuild_full_mask(mask_data, (height, width))
+                        blur_mask |= full_mask
+                    except:
+                        blur_mask[y1:y2, x1:x2] = True
+        
+        # Apply blur
+        if blur_mask.any():
+            kernel_size = 51  # Match export blur strength
+            blurred = cv2.GaussianBlur(cv_img, (kernel_size, kernel_size), 0)
+            cv_img[blur_mask] = blurred[blur_mask]
+        
+        # Add text overlays
+        for ann, original_patch, x1, y1, x2, y2 in ocr_text_overlays:
+            alterego = ann.get('alterego', '').strip()
+            if alterego:
+                cv_img = self._add_text_overlay(cv_img, ann, original_patch, x1, y1, x2, y2)
+        
+        # Convert back to PIL
+        return Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
+    
+    def _add_text_overlay(self, cv_img, ann, original_patch, x1, y1, x2, y2):
+        """Add replacement text with color matching."""
+        text = ann.get('alterego', '').strip()
+        if not text:
+            return cv_img
+        
+        # Ensure text is properly decoded as UTF-8
+        if isinstance(text, bytes):
+            text = text.decode('utf-8')
+        # Ensure it's a proper Unicode string
+        text = str(text)
+        
+        # Infer text color from original patch
+        def infer_color(patch):
+            if patch is None or patch.size == 0:
+                return (0, 0, 0)
+            try:
+                gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+                blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+                _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                
+                count_255 = np.count_nonzero(binary)
+                count_0 = binary.size - count_255
+                text_value = 0 if count_0 < count_255 else 255
+                
+                text_mask = binary == text_value
+                if np.count_nonzero(text_mask) < 5:
+                    text_mask = binary != text_value
+                    if np.count_nonzero(text_mask) < 5:
+                        return (0, 0, 0)
+                
+                text_pixels = patch[text_mask]
+                if text_pixels.size == 0:
+                    return (0, 0, 0)
+                
+                mean_bgr = np.mean(text_pixels, axis=0)
+                return tuple(int(np.clip(c, 0, 255)) for c in mean_bgr)
+            except:
+                return (0, 0, 0)
+        
+        text_color_bgr = infer_color(original_patch)
+        text_fill = (text_color_bgr[2], text_color_bgr[1], text_color_bgr[0], 255)
+        
+        # Convert to PIL for text rendering
+        cv_rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(cv_rgb)
+        draw = ImageDraw.Draw(pil_img)
+        
+        # Calculate font size
+        box_height = y2 - y1
+        font_size = max(12, int(box_height * 0.8))
+        
+        try:
+            # Try system fonts with UTF-8 support
+            font = None
+            fallback_fonts = [
+                "arial.ttf", "Arial.ttf",        # Windows
+                "arialuni.ttf",                  # Arial Unicode MS
+                "DejaVuSans.ttf",                # Linux (excellent UTF-8)
+                "NotoSans-Regular.ttf",          # Comprehensive Unicode
+                "Roboto-Regular.ttf"             # Android
+            ]
+            for font_name in fallback_fonts:
+                try:
+                    font = ImageFont.truetype(font_name, font_size, encoding='utf-8')
+                    break
+                except:
+                    continue
+            if font is None:
+                font = ImageFont.load_default()
+        except:
+            font = ImageFont.load_default()
+        
+        # Get text size and center
+        bbox_text = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox_text[2] - bbox_text[0]
+        text_height = bbox_text[3] - bbox_text[1]
+        
+        # Account for text baseline offset from textbbox
+        baseline_offset_y = bbox_text[1]
+        
+        text_x = x1 + (x2 - x1 - text_width) // 2 - bbox_text[0]
+        text_y = y1 + (y2 - y1 - text_height) // 2 - baseline_offset_y
+        
+        # Draw text
+        draw.text((text_x, text_y), text, font=font, fill=text_fill)
+        
+        # Convert back to OpenCV
+        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    
     def toggle_hidden_preview(self):
         """Toggle preview mode for hidden annotations."""
         self.show_hidden_preview = not self.show_hidden_preview
+        self._render()
+    
+    def set_preview_mode(self, enabled: bool):
+        """Set blur preview mode."""
+        self.preview_mode = enabled
         self._render()
     
     def clear(self):

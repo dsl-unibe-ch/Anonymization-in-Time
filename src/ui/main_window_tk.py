@@ -40,6 +40,9 @@ class MainWindow:
         self._last_scroll_time = 0
         self._scroll_speed = 3  # Start at 3 frames per scroll for faster initial movement
         
+        # Preview mode
+        self.preview_mode = False
+        
         # Setup window
         self.root.title("TiT Video Annotation Viewer")
         self.root.geometry("1200x800")
@@ -71,6 +74,7 @@ class MainWindow:
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
         view_menu.add_command(label="Toggle Hidden Preview (H)", command=self._toggle_hidden_preview)
+        view_menu.add_command(label="Toggle Blur Preview (B)", command=self._toggle_blur_preview)
         
         # Transitions menu
         transitions_menu = tk.Menu(menubar, tearoff=0)
@@ -167,6 +171,13 @@ class MainWindow:
         )
         self.toggle_preview_button.pack(side=tk.LEFT, padx=(20, 0))
         
+        self.preview_blur_button = ttk.Button(
+            button_frame,
+            text="Preview Blur (B)",
+            command=self._toggle_blur_preview
+        )
+        self.preview_blur_button.pack(side=tk.LEFT, padx=(5, 0))
+        
         self.save_button = ttk.Button(button_frame, text="Save State (S)", command=self._save_state)
         self.save_button.pack(side=tk.RIGHT, padx=(5, 0))
         
@@ -187,6 +198,8 @@ class MainWindow:
         self.root.bind('<End>', lambda e: self._go_to_position(self.annotation_manager.get_frame_count() - 1))
         self.root.bind('<h>', lambda e: self._toggle_hidden_preview())
         self.root.bind('<H>', lambda e: self._toggle_hidden_preview())
+        self.root.bind('<b>', lambda e: self._toggle_blur_preview())
+        self.root.bind('<B>', lambda e: self._toggle_blur_preview())
         self.root.bind('<s>', lambda e: self._save_state())
         self.root.bind('<S>', lambda e: self._save_state())
         self.root.bind('<Control-s>', lambda e: self._save_state())
@@ -331,6 +344,20 @@ class MainWindow:
         self.canvas.toggle_hidden_preview()
         state = "enabled" if self.canvas.show_hidden_preview else "disabled"
         self._update_status(f"Hidden preview {state}", timeout=2000)
+    
+    def _toggle_blur_preview(self):
+        """Toggle blur preview mode."""
+        self.preview_mode = not self.preview_mode
+        self.canvas.set_preview_mode(self.preview_mode)
+        state = "ON" if self.preview_mode else "OFF"
+        self._update_status(f"Blur preview {state}", timeout=2000)
+        
+        # Reload current frame to apply/remove preview
+        frame_idx = self.annotation_manager.frame_indices[self.current_position]
+        annotations = self.annotation_manager.get_frame_annotations(frame_idx)
+        is_transition = self.transition_manager.is_in_transition(frame_idx)
+        self.canvas.load_frame(frame_idx, annotations, is_transition)
+        self._update_labels(frame_idx)
     
     def _save_state(self):
         """Save current state."""

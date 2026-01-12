@@ -130,6 +130,12 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2, font_p
     if not text or not text.strip():
         return frame
     
+    # Ensure text is properly decoded as UTF-8
+    if isinstance(text, bytes):
+        text = text.decode('utf-8')
+    # Ensure it's a proper Unicode string
+    text = str(text)
+    
     def infer_text_color(patch, fallback=(0, 0, 0)):
         """Infer original text color from unblurred patch."""
         if patch is None or patch.size == 0:
@@ -177,18 +183,22 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2, font_p
     try:
         # Try to load custom font
         if font_path and os.path.exists(font_path):
-            font = ImageFont.truetype(font_path, font_size)
+            font = ImageFont.truetype(font_path, font_size, encoding='utf-8')
         else:
-            # Fallback to system fonts
+            # Fallback to system fonts with UTF-8 support
             fallback_fonts = [
-                "arial.ttf", "Arial.ttf", "Helvetica.ttc",
-                "DejaVuSans.ttf", "NotoSans-Regular.ttf", "Roboto-Regular.ttf"
+                "arial.ttf", "Arial.ttf",           # Windows
+                "arialuni.ttf",                     # Arial Unicode MS (good UTF-8 support)
+                "Helvetica.ttc",                    # macOS
+                "DejaVuSans.ttf",                   # Linux (excellent UTF-8 support)
+                "NotoSans-Regular.ttf",             # Android/Linux (comprehensive Unicode)
+                "Roboto-Regular.ttf"                # Android
             ]
             
             font = None
             for font_name in fallback_fonts:
                 try:
-                    font = ImageFont.truetype(font_name, font_size)
+                    font = ImageFont.truetype(font_name, font_size, encoding='utf-8')
                     break
                 except (OSError, IOError):
                     continue
@@ -203,9 +213,12 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2, font_p
     text_width = bbox_text[2] - bbox_text[0]
     text_height = bbox_text[3] - bbox_text[1]
     
+    # Account for text baseline offset from textbbox
+    baseline_offset_y = bbox_text[1]
+    
     # Calculate center position
-    text_x = x1 + (x2 - x1 - text_width) // 2
-    text_y = y1 + (y2 - y1 - text_height) // 2
+    text_x = x1 + (x2 - x1 - text_width) // 2 - bbox_text[0]
+    text_y = y1 + (y2 - y1 - text_height) // 2 - baseline_offset_y
     
     # Draw main text
     draw.text((text_x, text_y), text, font=font, fill=text_fill)

@@ -1073,8 +1073,8 @@ def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"],
     else:
         print(f"Using existing frames in {frames_dir}")
     
-    # Load names dictionary
-    with open(dict_path, 'r') as f:
+    # Load names dictionary with UTF-8 encoding
+    with open(dict_path, 'r', encoding='utf-8') as f:
         names_to_detect = json.load(f)
     
     # Process frames or load existing boxes
