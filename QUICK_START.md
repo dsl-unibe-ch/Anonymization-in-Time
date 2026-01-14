@@ -75,7 +75,7 @@ TiT_app/
 ├── video_processor_gui.py         # Batch processing GUI
 ├── annotation_viewer.py           # Annotation viewer with folder selection
 ├── process_videos.py              # Command-line batch processing
-├── simple_ocr.py                  # OCR processing module
+├── ocr.py                  # OCR processing module
 ├── batch_inference_sam3.py        # SAM3 processing module
 ├── transition_detection.py        # Transition detection module
 ├── utils.py                       # Video utilities

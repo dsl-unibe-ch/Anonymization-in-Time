@@ -28,7 +28,7 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 from utils import extract_video_frames
-from simple_ocr import process_video_ocr, process_videos_batch
+from ocr import process_video_ocr, process_videos_batch
 from batch_inference_sam3 import process_video_sam3, process_videos_sam3_batch
 from transition_detection import detect_scene_transitions
 

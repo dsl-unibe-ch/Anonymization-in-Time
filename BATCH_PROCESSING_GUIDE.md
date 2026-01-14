@@ -191,7 +191,7 @@ python process_videos.py \
 
 The pipeline executes in this order:
 1. **Frame Extraction** - Uses `utils.extract_video_frames()`
-2. **OCR Processing** - Uses `simple_ocr.process_video_ocr()`
+2. **OCR Processing** - Uses `ocr.process_video_ocr()`
    - Detects text boxes
    - Normalizes box heights
    - Tracks boxes across frames
@@ -282,7 +282,7 @@ results = process_multiple_videos(
 Individual processing functions:
 
 ```python
-from simple_ocr import process_video_ocr
+from ocr import process_video_ocr
 from batch_inference_sam3 import process_video_sam3
 from transition_detection import detect_scene_transitions
 from utils import extract_video_frames
