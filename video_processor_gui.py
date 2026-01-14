@@ -100,35 +100,30 @@ class VideoProcessorGUI:
         ttk.Entry(params_frame, textvariable=self.frame_step_var, width=10).grid(
             row=0, column=1, sticky=tk.W, padx=(10, 20), pady=2)
         
-        # OCR workers
-        ttk.Label(params_frame, text="OCR Workers:").grid(row=0, column=2, sticky=tk.W, pady=2)
-        self.ocr_workers_var = tk.StringVar(value="4")
-        ttk.Entry(params_frame, textvariable=self.ocr_workers_var, width=10).grid(
-            row=0, column=3, sticky=tk.W, padx=(10, 0), pady=2)
-        
         # OCR languages
-        ttk.Label(params_frame, text="OCR Languages:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Label(params_frame, text="OCR Languages:").grid(row=0, column=2, sticky=tk.W, pady=2)
         self.ocr_langs_var = tk.StringVar(value="en de")
         ttk.Entry(params_frame, textvariable=self.ocr_langs_var, width=20).grid(
-            row=1, column=1, sticky=tk.W, padx=(10, 20), pady=2)
+            row=0, column=3, sticky=tk.W, padx=(10, 0), pady=2)
         
         # SAM3 batch size
-        ttk.Label(params_frame, text="SAM3 Batch:").grid(row=1, column=2, sticky=tk.W, pady=2)
-        self.sam3_batch_var = tk.StringVar(value="4")
+        ttk.Label(params_frame, text="SAM3 Batch:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.sam3_batch_var = tk.StringVar(value="2")
         ttk.Entry(params_frame, textvariable=self.sam3_batch_var, width=10).grid(
-            row=1, column=3, sticky=tk.W, padx=(10, 0), pady=2)
+            row=1, column=1, sticky=tk.W, padx=(10, 20), pady=2)
+        
+        # SAM3 device
+        ttk.Label(params_frame, text="SAM3 Device:").grid(row=1, column=2, sticky=tk.W, pady=2)
+        self.sam3_device_var = tk.StringVar(value="cuda")
+        device_combo = ttk.Combobox(params_frame, textvariable=self.sam3_device_var, 
+                                    values=["cuda", "cpu"], state="readonly", width=10)
+        device_combo.grid(row=1, column=3, sticky=tk.W, padx=(10, 0), pady=2)
         
         # SAM3 prompt
         ttk.Label(params_frame, text="SAM3 Prompt:").grid(row=2, column=0, sticky=tk.W, pady=2)
         self.sam3_prompt_var = tk.StringVar(value="profile image, profile picture")
         ttk.Entry(params_frame, textvariable=self.sam3_prompt_var, width=40).grid(
             row=2, column=1, columnspan=3, sticky=(tk.W, tk.E), padx=(10, 0), pady=2)
-        
-        # SAM3 device
-        ttk.Label(params_frame, text="SAM3 Device:").grid(row=3, column=0, sticky=tk.W, pady=2)
-        self.sam3_device_var = tk.StringVar(value="cuda")
-        device_combo = ttk.Combobox(params_frame, textvariable=self.sam3_device_var, 
-                                    values=["cuda", "cpu"], state="readonly", width=10)
         device_combo.grid(row=3, column=1, sticky=tk.W, padx=(10, 0), pady=2)
         
         # === OPTIONS SECTION ===
@@ -193,7 +188,15 @@ class VideoProcessorGUI:
         ]
         files = filedialog.askopenfilenames(title="Select Video Files", filetypes=filetypes)
         if files:
+            # Handle both tuple and space-separated string (Windows quirk)
+            if isinstance(files, str):
+                # Single string returned - split by spaces but handle paths with spaces
+                files = self.root.tk.splitlist(files)
+            
             self.video_paths = [Path(f) for f in files]
+            print(f"Selected {len(self.video_paths)} video file(s):")
+            for vp in self.video_paths:
+                print(f"  - {vp}")
             self._update_video_label()
             self._check_ready()
     
@@ -265,10 +268,9 @@ class VideoProcessorGUI:
         # Collect parameters
         try:
             frame_step = int(self.frame_step_var.get())
-            ocr_workers = int(self.ocr_workers_var.get())
             sam3_batch_size = int(self.sam3_batch_var.get())
         except ValueError:
-            messagebox.showerror("Invalid Input", "Frame step, OCR workers, and SAM3 batch must be integers")
+            messagebox.showerror("Invalid Input", "Frame step and SAM3 batch must be integers")
             self._stop_processing()
             return
         
@@ -279,13 +281,13 @@ class VideoProcessorGUI:
         # Start processing in background thread
         thread = threading.Thread(
             target=self._processing_thread,
-            args=(frame_step, ocr_workers, ocr_languages, sam3_batch_size, 
+            args=(frame_step, ocr_languages, sam3_batch_size, 
                   sam3_prompt, sam3_device),
             daemon=True
         )
         thread.start()
     
-    def _processing_thread(self, frame_step, ocr_workers, ocr_languages, 
+    def _processing_thread(self, frame_step, ocr_languages, 
                           sam3_batch_size, sam3_prompt, sam3_device):
         """Background thread for processing videos"""
         # Redirect stdout to log
@@ -313,7 +315,6 @@ class VideoProcessorGUI:
                     output_base_dir=self.output_dir,
                     dict_path=self.dict_path,
                     ocr_languages=ocr_languages,
-                    ocr_workers=ocr_workers,
                     sam3_prompt=sam3_prompt,
                     sam3_batch_size=sam3_batch_size,
                     sam3_device=sam3_device,
@@ -329,7 +330,6 @@ class VideoProcessorGUI:
                     output_base_dir=self.output_dir,
                     dict_path=self.dict_path,
                     ocr_languages=ocr_languages,
-                    ocr_workers=ocr_workers,
                     sam3_prompt=sam3_prompt,
                     sam3_batch_size=sam3_batch_size,
                     sam3_device=sam3_device,

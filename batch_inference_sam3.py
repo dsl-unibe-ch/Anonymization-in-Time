@@ -48,9 +48,8 @@ def setup_model(device="cuda"):
     if device == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
-    
-    torch.inference_mode().__enter__()
+        # Note: Don't use global autocast here - it breaks other models like EasyOCR
+        # Use autocast locally in inference functions instead
     
     return model
 
@@ -484,9 +483,13 @@ def process_batch(model, datapoints, image_ids, postprocessor, device="cuda"):
         batch = collate(datapoints, dict_key="dummy")["dummy"]
         batch = copy_data_to_device(batch, device, non_blocking=True)
         
-        # Forward pass
+        # Forward pass with local autocast for bfloat16 (only affects this scope)
         with torch.no_grad():
-            output = model(batch)
+            if device == "cuda":
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    output = model(batch)
+            else:
+                output = model(batch)
         
         # Post-process
         processed_results = postprocessor.process_results(output, batch.find_metadatas)
@@ -577,7 +580,7 @@ def convert_results_to_unified_dict(all_results, tracks=None):
 
 
 def process_video_sam3(frames_folder, output_folder, text_prompt="profile image, profile picture",
-                      batch_size=4, device='cuda', mask_mode='color', blur_strength=51,
+                      batch_size=2, device='cuda', mask_mode='color', blur_strength=51,
                       masks_propagation=True, max_gap=5, save_images=False):
     """
     Process frames from a single video with SAM3.
@@ -751,6 +754,26 @@ def process_video_sam3(frames_folder, output_folder, text_prompt="profile image,
                 img.save(output_path)
     
     print(f"✓ SAM3 processing complete for {frames_folder.parent.name}")
+    
+    # Cleanup model from GPU after processing
+    print("Cleaning up SAM3 model from GPU...")
+    try:
+        del model
+        del transform
+        del postprocessor
+        
+        import gc
+        gc.collect()
+        
+        if device == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            print("✓ SAM3 model unloaded and GPU memory cleared")
+        else:
+            print("✓ SAM3 model unloaded")
+    except Exception as e:
+        print(f"Warning: Model cleanup error: {e}")
+    
     return unified
 
 

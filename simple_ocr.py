@@ -212,41 +212,40 @@ def process_frame(frame_path, reader, min_confidence=0.3):
 
     return frame_idx, detections
 
-def process_frames_parallel(frames_dir, languages, num_workers=-1):
+def process_frames_sequential(frames_dir, languages):
     """
-    Process frames in parallel using Joblib and save detected bounding boxes into a pickle file.
-
+    Process frames sequentially (GPU-safe).
+    
     Args:
         frames_dir (str): Directory containing the video frames.
         languages (list): List of languages for OCR.
-        num_workers (int): Number of parallel workers (-1 uses all available CPUs).
+        
+    Returns:
+        dict: Dictionary mapping frame indices to detected bounding boxes.
     """
-    # Get sorted list of frame file paths
     frame_paths = sorted(
         [os.path.join(frames_dir, f) for f in os.listdir(frames_dir) if f.endswith(('.jpg', '.png'))],
         key=lambda x: int(''.join(filter(str.isdigit, os.path.basename(x))))
     )
     
-    total_frames = len(frame_paths)
-    
-    print(f"Found {total_frames} frames in {frames_dir}")
-    print(f"Using {num_workers if num_workers > 0 else 'all'} parallel workers.")
+    print(f"Found {len(frame_paths)} frames in {frames_dir}")
 
-    # Initialize EasyOCR reader
     reader = get_easyocr_reader(languages)
-
-    # Parallel processing using Joblib
-    results = Parallel(n_jobs=num_workers, backend="loky", batch_size=5)(
-        delayed(process_frame)(frame_path, reader) for frame_path in tqdm(frame_paths, total=len(frame_paths), desc="Processing Frames")
-    )
-
-    # Filter out None results
-    results = [res for res in results if res is not None]
-
-    # Create a dictionary to store results
-    frame_boxes = {frame_idx: detections for frame_idx, detections in sorted(results)}
-
+    
+    frame_boxes = {}
+    for frame_path in tqdm(frame_paths, desc="Processing Frames"):
+        result = process_frame(frame_path, reader)
+        if result is not None:
+            frame_idx, detections = result
+            frame_boxes[frame_idx] = detections
+    
     return frame_boxes
+
+
+# Keep alias for backward compatibility
+def process_frames_parallel(frames_dir, languages, num_workers=-1, force_cpu=False):
+    """Alias for process_frames_sequential (parallel removed due to CUDA issues)."""
+    return process_frames_sequential(frames_dir, languages)
 
 def merge_split_names(frame_boxes, names_dict, x_threshold=50):
     """
@@ -1118,6 +1117,18 @@ def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"],
     
     print(f"Created {len(ocr_tracks)} OCR tracks across {len(unified)} frames")
     print(f"Saved final OCR boxes with track_ids to {output_pkl_path}")
+    
+    # Cleanup GPU memory after processing
+    try:
+        import gc
+        gc.collect()
+        
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except:
+        pass
     
     return unified
 
