@@ -16,17 +16,21 @@ from joblib import Parallel, delayed
 from pathlib import Path
 
 from utils import extract_video_frames
+from device_utils import resolve_device
 
 def select_device():
-    """Select CUDA device if available, otherwise CPU."""
-    import torch
-    if torch.cuda.is_available():
-        device = 'cuda'
-        use_gpu = True
-        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+    """Select best available device for OCR (EasyOCR GPU requires CUDA)."""
+    device = resolve_device("auto")
+    use_gpu = device == 'cuda'
+    if device == 'cuda':
+        try:
+            import torch
+            print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        except Exception:
+            print("Using CUDA")
+    elif device == 'mps':
+        print("MPS detected. EasyOCR GPU path is CUDA-only; running on CPU.")
     else:
-        device = 'cpu'
-        use_gpu = False
         print("CUDA not available. Using CPU.")
     return device, use_gpu
 

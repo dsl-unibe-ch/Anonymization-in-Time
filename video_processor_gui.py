@@ -114,9 +114,14 @@ class VideoProcessorGUI:
         
         # SAM3 device
         ttk.Label(params_frame, text="SAM3 Device:").grid(row=1, column=2, sticky=tk.W, pady=2)
-        self.sam3_device_var = tk.StringVar(value="cuda")
-        device_combo = ttk.Combobox(params_frame, textvariable=self.sam3_device_var, 
-                                    values=["cuda", "cpu"], state="readonly", width=10)
+        self.sam3_device_var = tk.StringVar(value="auto")
+        device_combo = ttk.Combobox(
+            params_frame,
+            textvariable=self.sam3_device_var,
+            values=["auto", "cuda", "mps", "cpu"],
+            state="readonly",
+            width=10
+        )
         device_combo.grid(row=1, column=3, sticky=tk.W, padx=(10, 0), pady=2)
         
         # SAM3 prompt

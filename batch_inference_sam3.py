@@ -29,17 +29,19 @@ from sam3.model.utils.misc import copy_data_to_device
 from sam3.train.data.sam3_image_dataset import InferenceMetadata, FindQueryLoaded, Image as SAMImage, Datapoint
 from sam3.train.transforms.basic_for_api import ComposeAPI, RandomResizeAPI, ToTensorAPI, NormalizeAPI
 from sam3.eval.postprocessors import PostProcessImage
+from device_utils import resolve_device, cleanup_device
 
 # Get SAM3 root directory
 sam3_root = os.path.join(os.path.dirname(sam3.__file__), "..")
 
 
-def setup_model(device="cuda"):
+def setup_model(device="auto"):
     """Load and configure the SAM3 model"""
+    device = resolve_device(device)
     bpe_path = f"{sam3_root}/assets/bpe_simple_vocab_16e6.txt.gz"
     model = build_sam3_image_model(bpe_path=bpe_path)
     
-    if device == "cuda":
+    if device != "cpu":
         model = model.to(device)
     
     model.eval()
@@ -476,9 +478,10 @@ def get_image_files(folder_path):
     return sorted(image_files)
 
 
-def process_batch(model, datapoints, image_ids, postprocessor, device="cuda"):
+def process_batch(model, datapoints, image_ids, postprocessor, device="auto"):
     """Process a batch of images"""
     try:
+        device = resolve_device(device)
         # Collate into batch
         batch = collate(datapoints, dict_key="dummy")["dummy"]
         batch = copy_data_to_device(batch, device, non_blocking=True)
@@ -488,6 +491,9 @@ def process_batch(model, datapoints, image_ids, postprocessor, device="cuda"):
             if device == "cuda":
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     output = model(batch)
+            elif device == "mps":
+                with torch.autocast("mps", dtype=torch.float16):
+                    output = model(batch)
             else:
                 output = model(batch)
         
@@ -495,9 +501,9 @@ def process_batch(model, datapoints, image_ids, postprocessor, device="cuda"):
         processed_results = postprocessor.process_results(output, batch.find_metadatas)
         
         # Clear GPU cache after processing
-        if device == "cuda":
+        if device in ("cuda", "mps"):
             del batch, output
-            torch.cuda.empty_cache()
+            cleanup_device(device)
         
         return processed_results
     
@@ -580,7 +586,7 @@ def convert_results_to_unified_dict(all_results, tracks=None):
 
 
 def process_video_sam3(frames_folder, output_folder, text_prompt="profile image, profile picture",
-                      batch_size=2, device='cuda', mask_mode='color', blur_strength=51,
+                      batch_size=2, device='auto', mask_mode='color', blur_strength=51,
                       masks_propagation=True, max_gap=5, save_images=False):
     """
     Process frames from a single video with SAM3.
@@ -613,10 +619,14 @@ def process_video_sam3(frames_folder, output_folder, text_prompt="profile image,
         blur_strength += 1
         print(f"Blur strength adjusted to {blur_strength} (must be odd)")
     
-    # Validate device
-    if device == "cuda" and not torch.cuda.is_available():
-        print("CUDA not available, falling back to CPU")
-        device = "cpu"
+    # Resolve device
+    device = resolve_device(device)
+    if device == "cuda":
+        print("Using CUDA for SAM3")
+    elif device == "mps":
+        print("Using Apple MPS for SAM3")
+    else:
+        print("Using CPU for SAM3")
     
     # Setup
     print("Loading model...")
@@ -753,10 +763,10 @@ def process_video_sam3(frames_folder, output_folder, text_prompt="profile image,
             if not saved:
                 img.save(output_path)
     
-    print(f"✓ SAM3 processing complete for {frames_folder.parent.name}")
+    print(f"SAM3 processing complete for {frames_folder.parent.name}")
     
     # Cleanup model from GPU after processing
-    print("Cleaning up SAM3 model from GPU...")
+    print("Cleaning up SAM3 model...")
     try:
         del model
         del transform
@@ -765,12 +775,8 @@ def process_video_sam3(frames_folder, output_folder, text_prompt="profile image,
         import gc
         gc.collect()
         
-        if device == "cuda" and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            print("✓ SAM3 model unloaded and GPU memory cleared")
-        else:
-            print("✓ SAM3 model unloaded")
+        cleanup_device(device)
+        print("SAM3 model unloaded")
     except Exception as e:
         print(f"Warning: Model cleanup error: {e}")
     
@@ -778,7 +784,7 @@ def process_video_sam3(frames_folder, output_folder, text_prompt="profile image,
 
 
 def process_videos_sam3_batch(video_folders, text_prompt="profile image, profile picture",
-                              batch_size=4, device='cuda', mask_mode='color', blur_strength=51,
+                              batch_size=4, device='auto', mask_mode='color', blur_strength=51,
                               masks_propagation=True, max_gap=5, save_images=False):
     """
     Process multiple video folders with SAM3 in batch.
@@ -787,7 +793,7 @@ def process_videos_sam3_batch(video_folders, text_prompt="profile image, profile
         video_folders (list): List of paths to video output folders (each should contain frames/ subdirectory)
         text_prompt (str): Text prompt to segment
         batch_size (int): Batch size for inference
-        device (str): Device to use ('cuda' or 'cpu')
+        device (str): Device to use ('auto', 'cuda', 'mps', or 'cpu')
         mask_mode (str): Mask visualization mode ('color' or 'blur')
         blur_strength (int): Blur kernel size for blur mode (must be odd)
         masks_propagation (bool): Enable temporal mask propagation
@@ -802,6 +808,9 @@ def process_videos_sam3_batch(video_folders, text_prompt="profile image, profile
     print(f"\n{'='*60}")
     print(f"BATCH PROCESSING SAM3: {len(video_folders)} videos")
     print(f"{'='*60}\n")
+    
+    device = resolve_device(device)
+    print(f"Resolved SAM3 device for batch: {device}")
     
     for video_folder in video_folders:
         video_folder = Path(video_folder)
@@ -852,8 +861,8 @@ def main():
                       help='Text prompt to segment (e.g., "person", "car")')
     parser.add_argument('--batch_size', type=int, default=4,
                       help='Batch size for inference (default: 1, increase with caution!)')
-    parser.add_argument('--device', type=str, default='cuda',
-                      help='Device to use (default: cuda, use "cpu" if crashing)')
+    parser.add_argument('--device', type=str, default='auto',
+                      help='Device to use: auto|cuda|mps|cpu (default: auto)')
     parser.add_argument('--mask_mode', type=str, default='color', choices=['color', 'blur'],
                       help='Mask visualization mode: "color" for colored overlay, "blur" for blurring')
     parser.add_argument('--blur_strength', type=int, default=51,
@@ -872,10 +881,9 @@ def main():
         args.blur_strength += 1  # Make it odd
         print(f"Blur strength adjusted to {args.blur_strength} (must be odd)")
     
-    # Validate device
-    if args.device == "cuda" and not torch.cuda.is_available():
-        print("CUDA not available, falling back to CPU")
-        args.device = "cpu"
+    # Resolve device
+    args.device = resolve_device(args.device)
+    print(f"Resolved device: {args.device}")
     
     # Setup
     print("Loading model...")

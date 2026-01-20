@@ -31,104 +31,58 @@ from utils import extract_video_frames
 from ocr import process_video_ocr, process_videos_batch
 from batch_inference_sam3 import process_video_sam3, process_videos_sam3_batch
 from transition_detection import detect_scene_transitions
+from device_utils import resolve_device, cleanup_device
 
 
-def cleanup_gpu_memory():
+def cleanup_gpu_memory(device: str | None = None):
     """
-    Clean up GPU memory and reset CUDA state between videos.
-    Helps prevent CUDA errors in batch processing.
+    Clean up accelerator memory between videos (CUDA or MPS).
     """
     if not TORCH_AVAILABLE:
         return
     
     try:
-        print("Starting aggressive GPU cleanup...")
+        print("Starting accelerator cleanup...")
         
         # Force garbage collection multiple times
         for _ in range(3):
             gc.collect()
         
-        if torch.cuda.is_available():
-            # Synchronize all CUDA operations
-            torch.cuda.synchronize()
-            
-            # Clear CUDA cache multiple times
-            for _ in range(3):
-                torch.cuda.empty_cache()
-            
-            # Clear IPC memory
-            try:
-                torch.cuda.ipc_collect()
-            except:
-                pass
-            
-            # Reset memory stats
-            try:
-                torch.cuda.reset_peak_memory_stats()
-                torch.cuda.reset_accumulated_memory_stats()
-            except:
-                pass
-            
-            # Another round of garbage collection
-            gc.collect()
-            
-            # Longer delay to let GPU fully reset
-            time.sleep(2.0)
-            
-            # Report memory status
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"✓ GPU cleanup complete - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
+        if device:
+            cleanup_device(device)
         else:
-            print("✓ GPU cleanup complete (CPU mode)")
+            cleanup_device("cuda")
+            cleanup_device("mps")
+        
+        gc.collect()
+        time.sleep(1.0)
+        print("✓ Accelerator cleanup complete")
     except Exception as e:
         print(f"Warning: GPU cleanup failed: {e}")
 
 
-def reset_cuda_on_error():
+def reset_cuda_on_error(device: str | None = None):
     """
-    Attempt to reset CUDA state after an error.
-    This is a last-resort recovery attempt.
+    Attempt to reset accelerator state after an error.
     """
     if not TORCH_AVAILABLE:
         return
     
     try:
-        if torch.cuda.is_available():
-            print("\n" + "="*70)
-            print("CUDA ERROR DETECTED - Attempting aggressive reset...")
-            print("="*70)
-            
-            # Multiple passes of cleanup
-            for i in range(5):
-                gc.collect()
-                torch.cuda.empty_cache()
-                time.sleep(0.5)
-            
-            try:
-                torch.cuda.ipc_collect()
-            except:
-                pass
-            
-            try:
-                torch.cuda.reset_peak_memory_stats()
-                torch.cuda.reset_accumulated_memory_stats()
-            except:
-                pass
-            
-            # Final wait
-            time.sleep(3)
-            
-            print("✓ CUDA reset complete - consider restarting if errors persist")
-            print("="*70 + "\n")
+        if device:
+            cleanup_device(device)
+        else:
+            cleanup_device("cuda")
+            cleanup_device("mps")
+        print("✓ Accelerator reset attempt completed - consider restarting if errors persist")
     except Exception as e:
-        print(f"Warning: CUDA reset failed: {e}")
+        print(f"Warning: GPU reset failed: {e}")
 
 
 def process_single_video(video_path, output_base_dir, dict_path, 
                         ocr_languages=["en", "de"], ocr_workers=4,
                         sam3_prompt="profile image, profile picture", sam3_batch_size=2,
-                        sam3_device='cuda', frame_step=1, 
+                        sam3_device='auto', frame_step=1, 
                         extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
     """
     Process a single video through the complete pipeline.
@@ -141,7 +95,7 @@ def process_single_video(video_path, output_base_dir, dict_path,
         ocr_workers (int): Number of parallel workers for OCR
         sam3_prompt (str): Text prompt for SAM3 segmentation
         sam3_batch_size (int): Batch size for SAM3 inference
-        sam3_device (str): Device for SAM3 ('cuda' or 'cpu')
+        sam3_device (str): Device for SAM3 ('auto', 'cuda', 'mps', or 'cpu')
         frame_step (int): Step between frames to extract
         extract_frames (bool): Whether to extract frames from video
         run_ocr (bool): Whether to run OCR processing
@@ -153,6 +107,9 @@ def process_single_video(video_path, output_base_dir, dict_path,
     """
     video_path = Path(video_path)
     output_base_dir = Path(output_base_dir)
+    
+    # Resolve accelerator once for the full video
+    sam3_device_resolved = resolve_device(sam3_device)
     
     # Create video-specific output directory
     video_name = video_path.stem
@@ -172,6 +129,7 @@ def process_single_video(video_path, output_base_dir, dict_path,
     print(f"PROCESSING VIDEO: {video_name}")
     print(f"Output directory: {video_output_dir}")
     print(f"{'='*70}\n")
+    print(f"SAM3 device: {sam3_device_resolved}")
     
     # Step 1: Extract frames
     frames_dir = video_output_dir / "frames"
@@ -209,9 +167,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
             print(f"✗ Error in OCR processing: {str(e)}")
             import traceback
             traceback.print_exc()
-            # Try to reset CUDA if it's a CUDA error
             if 'CUDA' in str(e) or 'cuda' in str(e):
-                reset_cuda_on_error()
+                reset_cuda_on_error(sam3_device_resolved)
     else:
         print(f"[2/4] Skipping OCR processing")
     
@@ -224,7 +181,7 @@ def process_single_video(video_path, output_base_dir, dict_path,
                 output_folder=video_output_dir,
                 text_prompt=sam3_prompt,
                 batch_size=sam3_batch_size,
-                device=sam3_device,
+                device=sam3_device_resolved,
                 mask_mode='color',
                 blur_strength=51,
                 masks_propagation=True,
@@ -238,9 +195,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
             print(f"✗ Error in SAM3 processing: {str(e)}")
             import traceback
             traceback.print_exc()
-            # Try to reset CUDA if it's a CUDA error
             if 'CUDA' in str(e) or 'cuda' in str(e):
-                reset_cuda_on_error()
+                reset_cuda_on_error(sam3_device_resolved)
     else:
         print(f"[3/4] Skipping SAM3 processing")
     
@@ -276,8 +232,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
 
 def process_multiple_videos(video_paths, output_base_dir, dict_path,
                            ocr_languages=["en", "de"], ocr_workers=4,
-                          sam3_prompt="profile image, profile picture", sam3_batch_size=2,
-                           sam3_device='cuda', frame_step=1,
+                           sam3_prompt="profile image, profile picture", sam3_batch_size=2,
+                           sam3_device='auto', frame_step=1,
                            extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
     """
     Process multiple videos through the complete pipeline.
@@ -290,7 +246,7 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
         ocr_workers (int): Number of parallel workers for OCR
         sam3_prompt (str): Text prompt for SAM3 segmentation
         sam3_batch_size (int): Batch size for SAM3 inference
-        sam3_device (str): Device for SAM3 ('cuda' or 'cpu')
+        sam3_device (str): Device for SAM3 ('auto', 'cuda', 'mps', or 'cpu')
         frame_step (int): Step between frames to extract
         extract_frames (bool): Whether to extract frames from videos
         run_ocr (bool): Whether to run OCR processing
@@ -301,19 +257,21 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
         list: List of result dictionaries for each video
     """
     all_results = []
+    sam3_device_resolved = resolve_device(sam3_device)
     
     print(f"\n{'='*70}")
     print(f"BATCH PROCESSING: {len(video_paths)} videos")
     print(f"Output base directory: {output_base_dir}")
+    print(f"Device: {sam3_device_resolved}")
     print(f"{'='*70}\n")
     
     for idx, video_path in enumerate(video_paths):
         # Clean up GPU memory before processing each video (especially important after first video)
         if idx > 0:
             print(f"\n{'='*70}")
-            print(f"Cleaning up GPU memory before video {idx+1}/{len(video_paths)}...")
+            print(f"Cleaning up accelerator before video {idx+1}/{len(video_paths)}...")
             print(f"{'='*70}")
-            cleanup_gpu_memory()
+            cleanup_gpu_memory(sam3_device_resolved)
         
         try:
             result = process_single_video(
@@ -324,7 +282,7 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                 ocr_workers=ocr_workers,
                 sam3_prompt=sam3_prompt,
                 sam3_batch_size=sam3_batch_size,
-                sam3_device=sam3_device,
+                sam3_device=sam3_device_resolved,
                 frame_step=frame_step,
                 extract_frames=extract_frames,
                 run_ocr=run_ocr,
@@ -340,9 +298,8 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                 'video_name': Path(video_path).stem,
                 'error': str(e)
             })
-            # Try to reset CUDA if it's a CUDA error
             if 'CUDA' in str(e) or 'cuda' in str(e):
-                reset_cuda_on_error()
+                reset_cuda_on_error(sam3_device_resolved)
     
     print(f"\n{'='*70}")
     print(f"BATCH PROCESSING COMPLETE")
@@ -350,9 +307,9 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
     print(f"Successful: {successful}/{len(video_paths)}")
     print(f"{'='*70}\n")
     
-    # Final GPU cleanup
-    print("Final GPU cleanup...")
-    cleanup_gpu_memory()
+    # Final accelerator cleanup
+    print("Final accelerator cleanup...")
+    cleanup_gpu_memory(sam3_device_resolved)
     
     return all_results
 
@@ -393,8 +350,8 @@ def main():
                        help='Text prompt for SAM3 segmentation')
     parser.add_argument('--sam3_batch_size', type=int, default=2,
                        help='Batch size for SAM3 inference (default: 2)')
-    parser.add_argument('--sam3_device', type=str, default='cuda', choices=['cuda', 'cpu'],
-                       help='Device for SAM3 (default: cuda)')
+    parser.add_argument('--sam3_device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'],
+                       help='Device for SAM3 (default: auto)')
     
     args = parser.parse_args()
     
