@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from pathlib import Path
 
 from utils import extract_video_frames
-from device_utils import resolve_device
+from utils import resolve_device
 
 def select_device():
     """Select best available device for OCR (EasyOCR GPU requires CUDA)."""

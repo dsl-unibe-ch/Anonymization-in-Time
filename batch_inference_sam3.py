@@ -29,7 +29,7 @@ from sam3.model.utils.misc import copy_data_to_device
 from sam3.train.data.sam3_image_dataset import InferenceMetadata, FindQueryLoaded, Image as SAMImage, Datapoint
 from sam3.train.transforms.basic_for_api import ComposeAPI, RandomResizeAPI, ToTensorAPI, NormalizeAPI
 from sam3.eval.postprocessors import PostProcessImage
-from device_utils import resolve_device, cleanup_device
+from utils import resolve_device, cleanup_device
 
 # Get SAM3 root directory
 sam3_root = os.path.join(os.path.dirname(sam3.__file__), "..")

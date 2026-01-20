@@ -17,7 +17,7 @@ from PIL import Image
 from tqdm import tqdm
 from transformers import Sam3Processor, Sam3Model
 
-from device_utils import resolve_device
+from utils import resolve_device
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
