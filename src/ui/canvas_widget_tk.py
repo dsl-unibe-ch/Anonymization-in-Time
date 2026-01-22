@@ -7,6 +7,7 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 import tkinter as tk
+import sys
 
 from utils.mask_utils import rebuild_full_mask
 
@@ -56,6 +57,10 @@ class CanvasWidget(tk.Canvas):
         self.bind('<Motion>', self._on_mouse_move)
         self.bind('<Button-1>', self._on_mouse_click)  # Left click
         self.bind('<Button-3>', self._on_right_click)  # Right click
+        # macOS: right-click can be Button-2 or Control+Click
+        if sys.platform == "darwin":
+            self.bind('<Button-2>', self._on_right_click)
+            self.bind('<Control-Button-1>', self._on_right_click)
         self.bind('<Configure>', self._on_resize)
     
     def load_frame(self, frame_idx: int, annotations: list, is_transition: bool = False) -> bool:
