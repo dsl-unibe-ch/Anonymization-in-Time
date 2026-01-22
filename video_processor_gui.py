@@ -106,14 +106,8 @@ class VideoProcessorGUI:
         ttk.Entry(params_frame, textvariable=self.ocr_langs_var, width=20).grid(
             row=0, column=3, sticky=tk.W, padx=(10, 0), pady=2)
         
-        # SAM3 batch size
-        ttk.Label(params_frame, text="SAM3 Batch:").grid(row=1, column=0, sticky=tk.W, pady=2)
-        self.sam3_batch_var = tk.StringVar(value="2")
-        ttk.Entry(params_frame, textvariable=self.sam3_batch_var, width=10).grid(
-            row=1, column=1, sticky=tk.W, padx=(10, 20), pady=2)
-        
         # SAM3 device
-        ttk.Label(params_frame, text="SAM3 Device:").grid(row=1, column=2, sticky=tk.W, pady=2)
+        ttk.Label(params_frame, text="SAM3 Device:").grid(row=1, column=0, sticky=tk.W, pady=2)
         self.sam3_device_var = tk.StringVar(value="auto")
         device_combo = ttk.Combobox(
             params_frame,
@@ -122,14 +116,13 @@ class VideoProcessorGUI:
             state="readonly",
             width=10
         )
-        device_combo.grid(row=1, column=3, sticky=tk.W, padx=(10, 0), pady=2)
+        device_combo.grid(row=1, column=1, sticky=tk.W, padx=(10, 20), pady=2)
         
         # SAM3 prompt
         ttk.Label(params_frame, text="SAM3 Prompt:").grid(row=2, column=0, sticky=tk.W, pady=2)
         self.sam3_prompt_var = tk.StringVar(value="profile image, profile picture")
         ttk.Entry(params_frame, textvariable=self.sam3_prompt_var, width=40).grid(
             row=2, column=1, columnspan=3, sticky=(tk.W, tk.E), padx=(10, 0), pady=2)
-        device_combo.grid(row=3, column=1, sticky=tk.W, padx=(10, 0), pady=2)
         
         # === OPTIONS SECTION ===
         options_frame = ttk.LabelFrame(main_frame, text="Processing Options", padding="10")
@@ -273,9 +266,8 @@ class VideoProcessorGUI:
         # Collect parameters
         try:
             frame_step = int(self.frame_step_var.get())
-            sam3_batch_size = int(self.sam3_batch_var.get())
         except ValueError:
-            messagebox.showerror("Invalid Input", "Frame step and SAM3 batch must be integers")
+            messagebox.showerror("Invalid Input", "Frame step must be an integer")
             self._stop_processing()
             return
         
@@ -286,14 +278,13 @@ class VideoProcessorGUI:
         # Start processing in background thread
         thread = threading.Thread(
             target=self._processing_thread,
-            args=(frame_step, ocr_languages, sam3_batch_size, 
-                  sam3_prompt, sam3_device),
+            args=(frame_step, ocr_languages, sam3_prompt, sam3_device),
             daemon=True
         )
         thread.start()
     
     def _processing_thread(self, frame_step, ocr_languages, 
-                          sam3_batch_size, sam3_prompt, sam3_device):
+                          sam3_prompt, sam3_device):
         """Background thread for processing videos"""
         # Redirect stdout to log
         import io
@@ -321,7 +312,6 @@ class VideoProcessorGUI:
                     dict_path=self.dict_path,
                     ocr_languages=ocr_languages,
                     sam3_prompt=sam3_prompt,
-                    sam3_batch_size=sam3_batch_size,
                     sam3_device=sam3_device,
                     frame_step=frame_step,
                     extract_frames=not self.skip_frames_var.get(),
@@ -336,7 +326,6 @@ class VideoProcessorGUI:
                     dict_path=self.dict_path,
                     ocr_languages=ocr_languages,
                     sam3_prompt=sam3_prompt,
-                    sam3_batch_size=sam3_batch_size,
                     sam3_device=sam3_device,
                     frame_step=frame_step,
                     extract_frames=not self.skip_frames_var.get(),

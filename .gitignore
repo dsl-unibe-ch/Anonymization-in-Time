@@ -37,3 +37,6 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# SAM3 model
+sam3.pt
