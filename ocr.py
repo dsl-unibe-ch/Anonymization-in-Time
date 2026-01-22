@@ -21,17 +21,13 @@ from utils import resolve_device
 def select_device():
     """Select best available device for OCR (EasyOCR GPU requires CUDA)."""
     device = resolve_device("auto")
-    use_gpu = device == 'cuda'
+    use_gpu = True if device in ['cuda', 'mps'] else False
     if device == 'cuda':
-        try:
-            import torch
-            print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
-        except Exception:
-            print("Using CUDA")
+        print("Using CUDA device for EasyOCR.")
     elif device == 'mps':
-        print("MPS detected. EasyOCR GPU path is CUDA-only; running on CPU.")
+        print("Using MPS device for EasyOCR.")
     else:
-        print("CUDA not available. Using CPU.")
+        print("GPU not available. Using CPU.")
     return device, use_gpu
 
 def get_easyocr_reader(languages):
