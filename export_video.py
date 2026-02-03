@@ -385,7 +385,11 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
     
     print(f"\nProcessing {len(frame_files)} frames...")
     print(f"Image size: {width}x{height}")
+    transition_blur_strength = blur_strength * 3
+    if transition_blur_strength % 2 == 0:
+        transition_blur_strength += 1
     print(f"Blur strength: {blur_strength}")
+    print(f"Transition blur strength: {transition_blur_strength}")
     print(f"OCR blur: {ocr_blur}, SAM3 blur: {sam3_blur}, Transition blur: {transition_blur}\n")
     
     # Process each frame
@@ -450,7 +454,8 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
         
         # Apply blurring if there's anything to blur
         if blur_mask.any():
-            frame = apply_blur_to_region(frame, blur_mask, blur_strength)
+            strength = transition_blur_strength if in_transition else blur_strength
+            frame = apply_blur_to_region(frame, blur_mask, strength)
         
         # Add custom text overlays for OCR boxes with alterego text
         for ann, original_patch, x1, y1, x2, y2 in ocr_text_overlays:
