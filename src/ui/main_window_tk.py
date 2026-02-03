@@ -230,18 +230,39 @@ class MainWindow:
                 f"Frames directory not found: {self.frames_dir}\n\n"
                 "Please ensure your data is organized as:\n"
                 "data/frames/  (containing 0000.jpg, 0001.jpg, ...)\n"
-                "data/annotations.pkl or data/ocr.pkl + data/sam3.pkl"
+                "data/annotations.pkl or data/ocr.pkl + data/sam3.pkl (or sam3_circular.pkl)"
             )
             return
         
         # Load annotations
-        if not self.annotation_manager.load_annotations():
+        combined_path = self.data_dir / "annotations.pkl"
+        sam_path = self.data_dir / "sam3.pkl"
+        sam_circular_path = self.data_dir / "sam3_circular.pkl"
+        sam_choice = None
+
+        if not combined_path.exists():
+            if sam_path.exists() and sam_circular_path.exists():
+                use_circular = messagebox.askyesnocancel(
+                    "Choose SAM3 Masks",
+                    "Both original and circular SAM3 masks are available.\n\n"
+                    "Yes = Use circular masks\n"
+                    "No  = Use original masks"
+                )
+                if use_circular is None:
+                    self._update_status("Load cancelled")
+                    return
+                sam_choice = sam_circular_path if use_circular else sam_path
+            elif sam_circular_path.exists() and not sam_path.exists():
+                sam_choice = sam_circular_path
+
+        if not self.annotation_manager.load_annotations(sam_path_override=sam_choice):
             messagebox.showwarning(
                 "Warning",
                 f"Failed to load annotations from {self.data_dir}\n\n"
                 "Please ensure you have either:\n"
                 "- data/annotations.pkl (combined)\n"
-                "- data/ocr.pkl and/or data/sam3.pkl (separate)"
+                "- data/ocr.pkl and/or data/sam3.pkl (separate)\n"
+                "- data/ocr.pkl and/or data/sam3_circular.pkl (separate)"
             )
             return
         

@@ -17,7 +17,7 @@ class CanvasWidget(tk.Canvas):
     
     # Color scheme
     COLOR_OCR_VISIBLE = "#00FF00"      # Green for visible OCR
-    COLOR_OCR_HIDDEN = "#FFFF00"       # Yellow for hidden OCR
+    COLOR_OCR_HIDDEN = "#FF0000"       # Red for hidden OCR
     COLOR_SAM_VISIBLE = "#0078FF"      # Blue for visible SAM
     COLOR_SAM_HIDDEN = "#FFA500"       # Orange for hidden SAM
     COLOR_HOVER = "#FF0000"            # Red for hover highlight

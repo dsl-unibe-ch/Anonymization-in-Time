@@ -15,6 +15,9 @@ Each video gets its own folder with:
 """
 
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 import argparse
 from pathlib import Path
 import json
@@ -28,6 +31,7 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 from utils import extract_video_frames
+from utils import export_ocr_text_timeline
 from ocr import process_video_ocr, process_videos_batch
 from batch_inference_sam3 import process_video_sam3, process_videos_sam3_batch
 from transition_detection import detect_scene_transitions
@@ -162,6 +166,18 @@ def process_single_video(video_path, output_base_dir, dict_path,
             )
             ocr_pkl = video_output_dir / "ocr.pkl"
             results['ocr_pkl'] = str(ocr_pkl)
+            # Export collapsed text timeline right after OCR
+            try:
+                timeline_path = video_output_dir / "ocr_text_timeline.txt"
+                export_ocr_text_timeline(
+                    ocr_pkl,
+                    timeline_path,
+                    video_path=video_path,
+                )
+                results['ocr_text_timeline'] = str(timeline_path)
+                print(f"✓ OCR text timeline saved: {timeline_path}")
+            except Exception as e:
+                print(f"Warning: Failed to export OCR text timeline: {e}")
             print(f"✓ OCR processing complete: {ocr_pkl}")
         except Exception as e:
             print(f"✗ Error in OCR processing: {str(e)}")

@@ -27,7 +27,7 @@ except ImportError:
     print("Error: Ultralytics SAM3 not found. Install with: pip install ultralytics")
     exit(1)
 
-from utils import resolve_device, cleanup_device
+from utils import resolve_device, cleanup_device, make_circular_mask_from_mask
 
 
 def setup_predictor(device="auto", model_path="sam3.pt", conf=0.25, half=True):
@@ -221,6 +221,86 @@ def rebuild_full_mask(mask_entry, img_shape):
     full = np.zeros(img_shape[:2], dtype=bool)
     full[y1:y2+1, x1:x2+1] = crop.astype(bool)
     return full
+
+
+def circularize_results(all_results):
+    """
+    Create circular masks around each SAM3 mask and return a new results list.
+    The circle is centered on the mask centroid and radius is the furthest mask pixel.
+    """
+    circular_results = []
+
+    for frame_idx, frame_results, img_path in all_results:
+        if not frame_results or 'masks' not in frame_results:
+            circular_results.append((frame_idx, frame_results, img_path))
+            continue
+
+        boxes = list(frame_results.get('boxes', []))
+        masks = list(frame_results.get('masks', []))
+        scores = list(frame_results.get('scores', []))
+        labels = list(frame_results.get('labels', [])) if frame_results.get('labels') is not None else []
+
+        # Resolve image shape
+        img_h = img_w = None
+        try:
+            with Image.open(img_path) as img:
+                img_w, img_h = img.size
+        except Exception:
+            pass
+        if img_h is None or img_w is None:
+            if boxes:
+                max_x2 = max(int(round(b[2])) for b in boxes)
+                max_y2 = max(int(round(b[3])) for b in boxes)
+                img_w = max_x2 + 1
+                img_h = max_y2 + 1
+            else:
+                img_w = img_h = 1
+
+        img_shape = (img_h, img_w)
+
+        new_boxes = []
+        new_masks = []
+        new_scores = []
+        new_labels = []
+
+        for i, mask_entry in enumerate(masks):
+            full_mask = rebuild_full_mask(mask_entry, img_shape)
+            circle_mask = make_circular_mask_from_mask(full_mask)
+            if circle_mask is None or not circle_mask.any():
+                if i < len(boxes):
+                    box = boxes[i]
+                    x1, y1, x2, y2 = [int(round(v)) for v in box]
+                    score = scores[i] if i < len(scores) else 0.0
+                    label = labels[i] if i < len(labels) else 1
+                    new_boxes.append(np.array([x1, y1, x2, y2], dtype=np.float32))
+                    new_masks.append(mask_entry)
+                    new_scores.append(float(score))
+                    new_labels.append(int(label))
+                continue
+
+            ys, xs = np.nonzero(circle_mask)
+            x1, x2 = int(xs.min()), int(xs.max())
+            y1, y2 = int(ys.min()), int(ys.max())
+            crop = circle_mask[y1:y2+1, x1:x2+1].astype(bool)
+
+            pack_output = isinstance(mask_entry, dict) and "packed" in mask_entry
+            mask_out = make_mask_entry(crop, [x1, y1, x2, y2], pack_bits=pack_output)
+
+            score = scores[i] if i < len(scores) else 0.0
+            label = labels[i] if i < len(labels) else 1
+
+            new_boxes.append(np.array([x1, y1, x2, y2], dtype=np.float32))
+            new_masks.append(mask_out)
+            new_scores.append(float(score))
+            new_labels.append(int(label))
+
+        circular_results.append((
+            frame_idx,
+            {'boxes': new_boxes, 'masks': new_masks, 'scores': new_scores, 'labels': new_labels},
+            img_path
+        ))
+
+    return circular_results
 
 
 def mask_entry_to_crop(mask_entry):
@@ -661,6 +741,22 @@ def process_video_sam3(frames_folder, output_folder,
         with open(unified_path, 'wb') as f:
             pickle.dump(unified, f)
         print(f"Saved unified detections to {unified_path} ({len(unified)} frames)")
+
+    # Save circularized masks without overwriting originals
+    circular_pickle_path = output_folder / 'detected_masks_circular.pkl'
+    circular_unified_path = output_folder / 'sam3_circular.pkl'
+    try:
+        with open(circular_unified_path, 'rb') as f:
+            _ = pickle.load(f)
+        print(f"Circular masks already exist at {circular_unified_path}, skipping")
+    except FileNotFoundError:
+        circular_results = circularize_results(all_results)
+        with open(circular_pickle_path, 'wb') as f:
+            pickle.dump(circular_results, f)
+        circular_unified = convert_results_to_unified_dict(circular_results, tracks)
+        with open(circular_unified_path, 'wb') as f:
+            pickle.dump(circular_unified, f)
+        print(f"Saved circular masks to {circular_unified_path} ({len(circular_unified)} frames)")
     
     if save_images:
         print(f"\nSaving processed images...")

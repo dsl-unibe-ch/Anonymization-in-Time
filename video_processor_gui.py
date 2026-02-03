@@ -140,7 +140,7 @@ class VideoProcessorGUI:
         ttk.Checkbutton(options_frame, text="Skip SAM3", 
                        variable=self.skip_sam3_var).pack(side=tk.LEFT, padx=(0, 15))
         
-        self.skip_transitions_var = tk.BooleanVar(value=False)
+        self.skip_transitions_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(options_frame, text="Skip transitions", 
                        variable=self.skip_transitions_var).pack(side=tk.LEFT)
         

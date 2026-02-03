@@ -24,17 +24,20 @@ class AnnotationManager:
         self.frame_indices: List[int] = []
         self.modified = False
         
-    def load_annotations(self) -> bool:
+    def load_annotations(self, sam_path_override: Optional[Path] = None) -> bool:
         """
         Load annotations from pickle files.
         Tries to load combined file first, then separate OCR/SAM3 files.
         
+        Args:
+            sam_path_override: Optional path to SAM3 pickle to use instead of sam3.pkl
+
         Returns:
             True if successful, False otherwise
         """
         combined_path = self.data_dir / "annotations.pkl"
         ocr_path = self.data_dir / "ocr.pkl"
-        sam_path = self.data_dir / "sam3.pkl"
+        sam_path = sam_path_override if sam_path_override else (self.data_dir / "sam3.pkl")
         
         try:
             # Try combined file first
