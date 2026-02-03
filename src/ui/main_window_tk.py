@@ -36,9 +36,9 @@ class MainWindow:
         # Transition marking state
         self.transition_start_frame = None  # Frame where transition marking started
         
-        # Mouse wheel scrolling acceleration
+        # Mouse wheel scrolling (one frame per tick)
         self._last_scroll_time = 0
-        self._scroll_speed = 3  # Start at 3 frames per scroll for faster initial movement
+        self._scroll_speed = 1
         
         # Preview mode
         self.preview_mode = False
@@ -319,27 +319,12 @@ class MainWindow:
             self._go_to_position(int(float(value)))
     
     def _on_mouse_wheel(self, event):
-        """Handle mouse wheel scrolling with acceleration."""
-        import time
-        
-        current_time = time.time()
-        time_since_last_scroll = current_time - self._last_scroll_time
-        
-        # If scrolling quickly (within 300ms), increase speed
-        if time_since_last_scroll < 0.3:
-            # Accelerate faster: increase by 3 frames each time, up to 30 frames per scroll
-            self._scroll_speed = min(self._scroll_speed + 3, 30)
-        else:
-            # Reset to base speed if paused
-            self._scroll_speed = 3
-        
-        self._last_scroll_time = current_time
-        
+        """Handle mouse wheel scrolling one frame at a time."""
         # event.delta is positive for scroll up, negative for scroll down
         if event.delta > 0:
-            self._jump_frames(-self._scroll_speed)
+            self._go_to_previous_frame()
         else:
-            self._jump_frames(self._scroll_speed)
+            self._go_to_next_frame()
     
     def _on_annotation_clicked(self, annotation_id: int, frame_idx: int, is_right_click: bool = False):
         """Handle annotation click."""
