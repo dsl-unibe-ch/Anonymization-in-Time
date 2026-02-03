@@ -86,7 +86,7 @@ python process_videos.py \
     --ocr_workers 8 \
     --sam3_prompt "profile image, profile picture, avatar" \
     --sam3_batch_size 8 \
-    --sam3_device cuda
+    --sam3_device auto
 ```
 
 **Skip specific steps:**
@@ -130,7 +130,7 @@ python process_videos.py \
 ### SAM3 Options:
 - `--sam3_prompt TEXT` - Text prompt for segmentation (default: "profile image, profile picture")
 - `--sam3_batch_size INT` - Batch size for inference (default: 4)
-- `--sam3_device {cuda,cpu}` - Device to use (default: cuda)
+- `--sam3_device {auto,cuda,mps,cpu}` - Device to use (default: auto; prefers CUDA, then MPS)
 
 ## Using Processed Videos with Annotation Viewer
 
@@ -315,7 +315,7 @@ transitions, file = detect_scene_transitions(
 
 **CUDA out of memory:**
 - Reduce `sam3_batch_size` to 1 or 2
-- Use `--sam3_device cpu`
+- Use `--sam3_device cpu` (or `mps` on Apple Silicon) if GPU runs out of memory
 
 **OCR too slow:**
 - Increase `frame_step` to process fewer frames

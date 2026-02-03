@@ -133,7 +133,7 @@ output_dir/
 
 3. **Frame step**: Use `--frame_step 2` to extract every 2nd frame (faster processing, smaller output).
 
-4. **CUDA memory**: If SAM3 crashes, reduce batch size or use `--sam3_device cpu`.
+4. **GPU memory**: If SAM3 crashes, reduce batch size or use `--sam3_device cpu` (or `mps` on Apple Silicon).
 
 5. **Recent folders**: The annotation viewer will remember recently opened folders (planned feature).
 
@@ -145,7 +145,7 @@ output_dir/
 
 **"CUDA out of memory"**:
 - Reduce SAM3 batch size to 1-2
-- Use CPU mode: `--sam3_device cpu`
+- Use CPU mode: `--sam3_device cpu` (or `mps` on Apple Silicon)
 
 **Processing stuck**:
 - Check the log window for errors
