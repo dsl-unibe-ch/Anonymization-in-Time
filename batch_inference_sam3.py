@@ -223,14 +223,201 @@ def rebuild_full_mask(mask_entry, img_shape):
     return full
 
 
-def circularize_results(all_results):
+def _circle_params_from_mask(full_mask):
+    """Return (cx, cy, r) for a boolean mask, or None if empty."""
+    if full_mask is None:
+        return None
+    mask = np.asarray(full_mask).astype(bool)
+    if mask.size == 0 or not mask.any():
+        return None
+    ys, xs = np.nonzero(mask)
+    cx = float(xs.mean())
+    cy = float(ys.mean())
+    dx = xs - cx
+    dy = ys - cy
+    r = float(np.sqrt(dx * dx + dy * dy).max())
+    if not np.isfinite(r) or r <= 0:
+        return None
+    return cx, cy, r
+
+
+def _circle_crop_from_params(cx, cy, r, img_shape):
+    """Return (crop_mask, bbox) for a circle, or (None, None) if invalid."""
+    img_h, img_w = img_shape
+    x1 = int(max(0, math.floor(cx - r)))
+    y1 = int(max(0, math.floor(cy - r)))
+    x2 = int(min(img_w - 1, math.ceil(cx + r)))
+    y2 = int(min(img_h - 1, math.ceil(cy + r)))
+    if x2 < x1 or y2 < y1:
+        return None, None
+    yy, xx = np.ogrid[y1:y2 + 1, x1:x2 + 1]
+    circle = (xx - cx) ** 2 + (yy - cy) ** 2 <= r ** 2
+    return circle.astype(bool), [x1, y1, x2, y2]
+
+
+def _kmeans_1d(values, k, max_iter=20):
+    """Simple 1D k-means for small lists."""
+    if not values or k <= 0:
+        return []
+    if k == 1 or len(values) == 1:
+        return [float(np.mean(values))]
+
+    data = np.array(values, dtype=np.float32)
+    # Initialize centers with quantiles for stability
+    quantiles = np.linspace(0, 100, k + 2)[1:-1]
+    centers = np.percentile(data, quantiles).astype(np.float32)
+
+    for _ in range(max_iter):
+        # Assign to nearest center
+        distances = np.abs(data[:, None] - centers[None, :])
+        labels = np.argmin(distances, axis=1)
+
+        new_centers = []
+        for idx in range(k):
+            cluster = data[labels == idx]
+            if cluster.size == 0:
+                new_centers.append(centers[idx])
+            else:
+                new_centers.append(float(cluster.mean()))
+        new_centers = np.array(new_centers, dtype=np.float32)
+
+        if np.allclose(new_centers, centers, rtol=0, atol=1e-3):
+            break
+        centers = new_centers
+
+    return sorted(float(c) for c in centers)
+
+
+def _merge_close_centers(centers, merge_threshold=0.2):
+    """Merge centers that are too close (relative)."""
+    if not centers:
+        return centers
+    centers = sorted(centers)
+    merged = [centers[0]]
+    for c in centers[1:]:
+        prev = merged[-1]
+        if prev <= 0:
+            merged.append(c)
+            continue
+        if abs(c - prev) / prev < merge_threshold:
+            merged[-1] = (prev + c) / 2.0
+        else:
+            merged.append(c)
+    return merged
+
+
+def circularize_results(
+    all_results,
+    tracks=None,
+    smooth_alpha=0.35,
+    radius_normalization=True,
+    max_radius_clusters=3,
+    radius_merge_threshold=0.2,
+):
     """
     Create circular masks around each SAM3 mask and return a new results list.
-    The circle is centered on the mask centroid and radius is the furthest mask pixel.
+    If tracks are provided, centers/radii are smoothed across frames to reduce jitter.
     """
     circular_results = []
 
-    for frame_idx, frame_results, img_path in all_results:
+    # Cache frame shapes by list index
+    frame_shapes = {}
+    for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):
+        img_h = img_w = None
+        try:
+            with Image.open(img_path) as img:
+                img_w, img_h = img.size
+        except Exception:
+            pass
+        if img_h is None or img_w is None:
+            boxes = frame_results.get('boxes', []) if frame_results else []
+            if boxes:
+                max_x2 = max(int(round(b[2])) for b in boxes)
+                max_y2 = max(int(round(b[3])) for b in boxes)
+                img_w = max_x2 + 1
+                img_h = max_y2 + 1
+            else:
+                img_w = img_h = 1
+        frame_shapes[list_idx] = (img_h, img_w)
+
+    # Build smoothed circle params by track
+    smoothed_params = {}
+    if tracks:
+        for track in tracks:
+            prev = None
+            for list_idx, mask_idx in track:
+                if list_idx < 0 or list_idx >= len(all_results):
+                    continue
+                frame_results = all_results[list_idx][1]
+                if not frame_results or 'masks' not in frame_results:
+                    continue
+                masks = frame_results.get('masks', [])
+                if mask_idx < 0 or mask_idx >= len(masks):
+                    continue
+                img_shape = frame_shapes.get(list_idx, (1, 1))
+                mask_entry = masks[mask_idx]
+                full_mask = rebuild_full_mask(mask_entry, img_shape)
+                params = _circle_params_from_mask(full_mask)
+                if params is None:
+                    continue
+                if prev is None or smooth_alpha is None:
+                    smooth = params
+                else:
+                    cx = smooth_alpha * params[0] + (1 - smooth_alpha) * prev[0]
+                    cy = smooth_alpha * params[1] + (1 - smooth_alpha) * prev[1]
+                    r = smooth_alpha * params[2] + (1 - smooth_alpha) * prev[2]
+                    smooth = (cx, cy, r)
+                prev = smooth
+                smoothed_params[(list_idx, mask_idx)] = smooth
+
+    # First pass: compute params per mask
+    params_cache = {}
+    for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):
+        if not frame_results or 'masks' not in frame_results:
+            params_cache[(list_idx, None)] = None
+            continue
+
+        boxes = list(frame_results.get('boxes', []))
+        masks = list(frame_results.get('masks', []))
+
+        img_shape = frame_shapes.get(list_idx, (1, 1))
+
+        for i, mask_entry in enumerate(masks):
+            params = smoothed_params.get((list_idx, i))
+            if params is None:
+                full_mask = rebuild_full_mask(mask_entry, img_shape)
+                params = _circle_params_from_mask(full_mask)
+            params_cache[(list_idx, i)] = params
+
+    # Second pass: optional radius normalization per frame
+    normalized_params = {}
+    if radius_normalization:
+        for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):
+            if not frame_results or 'masks' not in frame_results:
+                continue
+            masks = frame_results.get('masks', [])
+            radii = []
+            for i in range(len(masks)):
+                params = params_cache.get((list_idx, i))
+                if params is not None:
+                    radii.append(params[2])
+            if not radii:
+                continue
+            k = min(max_radius_clusters, len(radii))
+            centers = _kmeans_1d(radii, k=k, max_iter=20)
+            centers = _merge_close_centers(centers, merge_threshold=radius_merge_threshold)
+            if not centers:
+                continue
+            for i in range(len(masks)):
+                params = params_cache.get((list_idx, i))
+                if params is None:
+                    continue
+                r = params[2]
+                nearest = min(centers, key=lambda c: abs(c - r))
+                normalized_params[(list_idx, i)] = (params[0], params[1], float(nearest))
+
+    # Final pass: build circular results
+    for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):
         if not frame_results or 'masks' not in frame_results:
             circular_results.append((frame_idx, frame_results, img_path))
             continue
@@ -240,23 +427,7 @@ def circularize_results(all_results):
         scores = list(frame_results.get('scores', []))
         labels = list(frame_results.get('labels', [])) if frame_results.get('labels') is not None else []
 
-        # Resolve image shape
-        img_h = img_w = None
-        try:
-            with Image.open(img_path) as img:
-                img_w, img_h = img.size
-        except Exception:
-            pass
-        if img_h is None or img_w is None:
-            if boxes:
-                max_x2 = max(int(round(b[2])) for b in boxes)
-                max_y2 = max(int(round(b[3])) for b in boxes)
-                img_w = max_x2 + 1
-                img_h = max_y2 + 1
-            else:
-                img_w = img_h = 1
-
-        img_shape = (img_h, img_w)
+        img_shape = frame_shapes.get(list_idx, (1, 1))
 
         new_boxes = []
         new_masks = []
@@ -264,9 +435,11 @@ def circularize_results(all_results):
         new_labels = []
 
         for i, mask_entry in enumerate(masks):
-            full_mask = rebuild_full_mask(mask_entry, img_shape)
-            circle_mask = make_circular_mask_from_mask(full_mask)
-            if circle_mask is None or not circle_mask.any():
+            params = normalized_params.get((list_idx, i)) if radius_normalization else None
+            if params is None:
+                params = params_cache.get((list_idx, i))
+
+            if params is None:
                 if i < len(boxes):
                     box = boxes[i]
                     x1, y1, x2, y2 = [int(round(v)) for v in box]
@@ -278,18 +451,24 @@ def circularize_results(all_results):
                     new_labels.append(int(label))
                 continue
 
-            ys, xs = np.nonzero(circle_mask)
-            x1, x2 = int(xs.min()), int(xs.max())
-            y1, y2 = int(ys.min()), int(ys.max())
-            crop = circle_mask[y1:y2+1, x1:x2+1].astype(bool)
+            crop, bbox = _circle_crop_from_params(params[0], params[1], params[2], img_shape)
+            if crop is None or bbox is None:
+                if i < len(boxes):
+                    box = boxes[i]
+                    x1, y1, x2, y2 = [int(round(v)) for v in box]
+                    score = scores[i] if i < len(scores) else 0.0
+                    label = labels[i] if i < len(labels) else 1
+                    new_boxes.append(np.array([x1, y1, x2, y2], dtype=np.float32))
+                    new_masks.append(mask_entry)
+                    new_scores.append(float(score))
+                    new_labels.append(int(label))
+                continue
 
             pack_output = isinstance(mask_entry, dict) and "packed" in mask_entry
-            mask_out = make_mask_entry(crop, [x1, y1, x2, y2], pack_bits=pack_output)
-
+            mask_out = make_mask_entry(crop, bbox, pack_bits=pack_output)
             score = scores[i] if i < len(scores) else 0.0
             label = labels[i] if i < len(labels) else 1
-
-            new_boxes.append(np.array([x1, y1, x2, y2], dtype=np.float32))
+            new_boxes.append(np.array(bbox, dtype=np.float32))
             new_masks.append(mask_out)
             new_scores.append(float(score))
             new_labels.append(int(label))
@@ -750,7 +929,7 @@ def process_video_sam3(frames_folder, output_folder,
             _ = pickle.load(f)
         print(f"Circular masks already exist at {circular_unified_path}, skipping")
     except FileNotFoundError:
-        circular_results = circularize_results(all_results)
+        circular_results = circularize_results(all_results, tracks=tracks, smooth_alpha=0.35)
         with open(circular_pickle_path, 'wb') as f:
             pickle.dump(circular_results, f)
         circular_unified = convert_results_to_unified_dict(circular_results, tracks)
