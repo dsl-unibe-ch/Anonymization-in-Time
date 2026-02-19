@@ -18,6 +18,16 @@ from pathlib import Path
 from utils import extract_video_frames
 from utils import resolve_device
 
+def _bbox_to_int_tuple(bbox):
+    """Normalize a bbox-like iterable to an integer (x1, y1, x2, y2) tuple."""
+    x1, y1, x2, y2 = bbox
+    return (
+        int(round(float(x1))),
+        int(round(float(y1))),
+        int(round(float(x2))),
+        int(round(float(y2))),
+    )
+
 def select_device():
     """Select best available device for OCR (EasyOCR GPU requires CUDA)."""
     device = resolve_device("auto")
@@ -349,7 +359,8 @@ def merge_split_names(frame_boxes, names_dict, x_threshold=50):
                         new_box = {
                             'bbox': (new_x1, new_y1, new_x2, new_y2),
                             'text': combined_text,
-                            'confidence': (box1['confidence'] + box2['confidence']) / 2
+                            'confidence': (box1['confidence'] + box2['confidence']) / 2,
+                            'original_bbox': (new_x1, new_y1, new_x2, new_y2)
                         }
                         
                         # Update box1 to be the merged box and continue checking for more merges with this new box
@@ -378,8 +389,6 @@ def split_boxes_into_words(frame_boxes):
     Returns:
         dict: Frame boxes where each box represents a single word
     """
-    import numpy as np
-    
     split_frame_boxes = {}
     
     for frame_idx, boxes in frame_boxes.items():
@@ -393,11 +402,17 @@ def split_boxes_into_words(frame_boxes):
             words = text.split()
             if len(words) <= 1:
                 # Single word or empty - keep as is
-                split_boxes.append(box)
+                box_copy = box.copy()
+                if 'bbox' in box_copy:
+                    box_copy['bbox'] = _bbox_to_int_tuple(box_copy['bbox'])
+                if box_copy.get('parent_box') is not None:
+                    box_copy['parent_box'] = _bbox_to_int_tuple(box_copy['parent_box'])
+                split_boxes.append(box_copy)
                 continue
             
             # Multi-word box - split it proportionally based on word lengths
-            x1, y1, x2, y2 = box['bbox']
+            x1, y1, x2, y2 = _bbox_to_int_tuple(box['bbox'])
+            parent_bbox = _bbox_to_int_tuple(box.get('original_bbox', box['bbox']))
             box_width = x2 - x1
             
             # Estimate padding (typically ~2% of box width or min 2 pixels on each side)
@@ -409,7 +424,7 @@ def split_boxes_into_words(frame_boxes):
             # Split the content area (box minus padding) proportionally among words
             content_start = x1 + padding
             content_end = x2 - padding
-            content_width = content_end - content_start
+            content_width = max(1, content_end - content_start)
             
             current_x = x1  # Start from original box edge (includes padding for first word)
             word_boxes = []
@@ -433,11 +448,14 @@ def split_boxes_into_words(frame_boxes):
                     word_proportion = word_length / total_word_chars
                     word_x2 = content_start + int(sum(len(words[j]) for j in range(i + 1)) / total_word_chars * content_width)
                 
+                word_x1 = int(max(x1, min(x2, word_x1)))
+                word_x2 = int(max(word_x1, min(x2, word_x2)))
+                
                 word_boxes.append({
                     'bbox': (word_x1, y1, word_x2, y2),
                     'text': word,
                     'confidence': box.get('confidence', 1.0),
-                    'parent_box': box['bbox'],
+                    'parent_box': parent_bbox,
                     'parent_box_text': text,  # Save full parent text for matching
                     'track_id': box.get('track_id', None)  # Preserve track_id from parent
                 })
@@ -595,9 +613,13 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
         # Get parent box if available
         parent_box = boxes[0].get('parent_box', None)
         parent_box_text = boxes[0].get('parent_box_text', None)
+        track_ids = [b.get('track_id') for b in boxes if b.get('track_id') is not None]
+        track_id = track_ids[0] if track_ids else None
+        if parent_box is not None:
+            parent_box = _bbox_to_int_tuple(parent_box)
         
         return {
-            'bbox': (x1, y1, x2, y2),
+            'bbox': _bbox_to_int_tuple((x1, y1, x2, y2)),
             'text': ' '.join(b.get('text', '') for b in boxes),
             'name': match['name'],
             'alterego': match['alterego'],
@@ -605,6 +627,7 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
             'to_show': True,
             'parent_box': parent_box,
             'parent_box_text': parent_box_text,
+            'track_id': track_id,
             'match_type': 'word_level'
         }
     
@@ -711,6 +734,15 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
         curr_x1, curr_y1, curr_x2, curr_y2 = current_bbox
         prev_x1, prev_y1, prev_x2, prev_y2 = prev_bbox
         
+        def union_bbox(a, b):
+            """Keep full coverage across minor OCR size fluctuations."""
+            return (
+                int(min(a[0], b[0])),
+                int(min(a[1], b[1])),
+                int(max(a[2], b[2])),
+                int(max(a[3], b[3])),
+            )
+        
         # Calculate centers and movements
         curr_center_x = (curr_x1 + curr_x2) / 2
         curr_center_y = (curr_y1 + curr_y2) / 2
@@ -728,30 +760,35 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
         
         # Determine movement type and stabilize accordingly
         if x_movement < movement_threshold and y_movement < movement_threshold:
-            # Static: keep previous frame coordinates exactly
-            return prev_bbox
+            # Static center with significant size shift often means OCR changed
+            # text extent. Keep the union to avoid shrinking true text coverage.
+            width_change = abs(curr_width - prev_width) / max(1, prev_width)
+            height_change = abs(curr_height - prev_height) / max(1, prev_height)
+            if max(width_change, height_change) > 0.15:
+                return union_bbox(current_bbox, prev_bbox)
+            return _bbox_to_int_tuple(prev_bbox)
             
         elif y_movement < movement_threshold or y_movement < x_movement / 2:
             # Horizontal movement: preserve Y coordinates, use current X but maintain consistent width
-            stable_width = prev_width  # Keep consistent width
+            stable_width = max(prev_width, curr_width)  # Prevent width collapse
             stable_y1 = prev_y1
             stable_y2 = prev_y2
             
             # Use current center X but with stable width
-            stable_x1 = int(curr_center_x - stable_width / 2)
-            stable_x2 = stable_x1 + stable_width
+            stable_x1 = int(round(curr_center_x - stable_width / 2))
+            stable_x2 = stable_x1 + int(stable_width)
             
             return (stable_x1, stable_y1, stable_x2, stable_y2)
             
         elif x_movement < movement_threshold or x_movement < y_movement / 2:
             # Vertical movement: preserve X coordinates, use current Y but maintain consistent height
-            stable_height = prev_height  # Keep consistent height
+            stable_height = max(prev_height, curr_height)  # Prevent height collapse
             stable_x1 = prev_x1
             stable_x2 = prev_x2
             
             # Use current center Y but with stable height
-            stable_y1 = int(curr_center_y - stable_height / 2)
-            stable_y2 = stable_y1 + stable_height
+            stable_y1 = int(round(curr_center_y - stable_height / 2))
+            stable_y2 = stable_y1 + int(stable_height)
             
             return (stable_x1, stable_y1, stable_x2, stable_y2)
             
@@ -761,14 +798,14 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
             width_diff = abs(curr_width - prev_width) / prev_width if prev_width > 0 else 0
             height_diff = abs(curr_height - prev_height) / prev_height if prev_height > 0 else 0
             
-            final_width = prev_width if width_diff > 0.2 else curr_width
-            final_height = prev_height if height_diff > 0.2 else curr_height
+            final_width = max(prev_width, curr_width) if width_diff > 0.2 else curr_width
+            final_height = max(prev_height, curr_height) if height_diff > 0.2 else curr_height
             
             # Center the box with stable dimensions
-            stable_x1 = int(curr_center_x - final_width / 2)
-            stable_y1 = int(curr_center_y - final_height / 2)
-            stable_x2 = stable_x1 + final_width
-            stable_y2 = stable_y1 + final_height
+            stable_x1 = int(round(curr_center_x - final_width / 2))
+            stable_y1 = int(round(curr_center_y - final_height / 2))
+            stable_x2 = stable_x1 + int(final_width)
+            stable_y2 = stable_y1 + int(final_height)
             
             return (stable_x1, stable_y1, stable_x2, stable_y2)
 
@@ -829,7 +866,10 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
             # Single detection - keep as is
             frame_idx, box = track[0]
             box_idx_in_stabilized = len(stabilized_boxes[frame_idx])
-            stabilized_boxes[frame_idx].append(box)
+            stabilized_box = box.copy()
+            stabilized_box['track_id'] = track_id
+            stabilized_box['bbox'] = _bbox_to_int_tuple(stabilized_box['bbox'])
+            stabilized_boxes[frame_idx].append(stabilized_box)
             track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id
             continue
         
@@ -846,6 +886,8 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
                 # First frame in track - keep original coordinates
                 stabilized_box = box.copy()
                 stabilized_box['text'] = best_text  # Use consistent text
+                stabilized_box['track_id'] = track_id
+                stabilized_box['bbox'] = _bbox_to_int_tuple(stabilized_box['bbox'])
             else:
                 # Stabilize based on previous frame
                 prev_frame, prev_box = track[i-1]
@@ -891,8 +933,9 @@ def normalize_box_heights(frame_boxes, height_clusters=None):
             for box in frame_boxes_list:
                 if 'bbox' in box:
                     x1, y1, x2, y2 = box['bbox']
-                    height = y2 - y1
-                    all_heights.append(height)
+                    height = int(round(float(y2 - y1)))
+                    if height > 0:
+                        all_heights.append(height)
         
         if not all_heights:
             return frame_boxes, []
@@ -902,7 +945,18 @@ def normalize_box_heights(frame_boxes, height_clusters=None):
         n_clusters = min(4, len(set(all_heights)))  # Max 4 text sizes
         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
         kmeans.fit(heights_array)
-        height_clusters = sorted(kmeans.cluster_centers_.flatten())
+        height_clusters = sorted({
+            max(1, int(round(float(h))))
+            for h in kmeans.cluster_centers_.flatten()
+        })
+    else:
+        height_clusters = sorted({
+            max(1, int(round(float(h))))
+            for h in height_clusters
+        })
+    
+    if not height_clusters:
+        return frame_boxes, []
     
     # Normalize boxes to closest cluster height
     normalized_boxes = {}
@@ -911,18 +965,23 @@ def normalize_box_heights(frame_boxes, height_clusters=None):
         for box in boxes:
             if 'bbox' in box:
                 x1, y1, x2, y2 = box['bbox']
-                current_height = y2 - y1
+                current_height = int(round(float(y2 - y1)))
                 
                 # Find closest cluster height
                 closest_height = min(height_clusters, key=lambda h: abs(h - current_height))
                 
                 # Adjust box to new height (center vertically)
                 height_diff = closest_height - current_height
-                new_y1 = max(0, y1 - height_diff // 2)
-                new_y2 = new_y1 + int(closest_height)
+                new_y1 = int(max(0, round(float(y1) - (height_diff / 2))))
+                new_y2 = int(new_y1 + int(closest_height))
                 
                 normalized_box = box.copy()
-                normalized_box['bbox'] = (x1, new_y1, x2, new_y2)
+                normalized_box['bbox'] = (
+                    int(round(float(x1))),
+                    int(new_y1),
+                    int(round(float(x2))),
+                    int(new_y2),
+                )
                 normalized_frame_boxes.append(normalized_box)
             else:
                 normalized_frame_boxes.append(box)
@@ -1019,14 +1078,23 @@ def ocr_boxes_to_unified(frame_boxes, tracks=None):
             bbox = box.get('bbox') or box.get('original_bbox')
             if not bbox:
                 continue
-            x1, y1, x2, y2 = bbox
+            x1, y1, x2, y2 = _bbox_to_int_tuple(bbox)
+            
+            parent_box = box.get('parent_box', None)
+            if parent_box is not None:
+                try:
+                    parent_box = _bbox_to_int_tuple(parent_box)
+                except Exception:
+                    parent_box = None
             
             # Get track_id for this box
-            track_id = track_map.get((frame_idx, i), None)
+            track_id = box.get('track_id')
+            if track_id is None:
+                track_id = track_map.get((frame_idx, i), None)
             
             entry = {
-                "bbox": (int(x1), int(y1), int(x2), int(y2)),
-                "parent_box": box.get('parent_box', None),
+                "bbox": (x1, y1, x2, y2),
+                "parent_box": parent_box,
                 "score": float(box.get('confidence', 1.0)),
                 "text": box.get('text', '') or '',
                 "alterego": box.get('alterego', '') or '',
