@@ -299,6 +299,23 @@ def postprocess_word_boxes(word_boxes):
             merged.append(cur)
             i += 1
 
+        # 4) Expand edge word boxes to parent box boundaries to avoid clipped
+        # first/last letters produced by Paddle's internal word splitting.
+        merged_with_bbox = [b for b in merged if b.get("bbox")]
+        if merged_with_bbox:
+            parent_bbox = merged_with_bbox[0].get("parent_box")
+            if parent_bbox:
+                px1, py1, px2, py2 = parent_bbox
+                left_idx = min(range(len(merged)), key=lambda k: merged[k]["bbox"][0] if merged[k].get("bbox") else 10**9)
+                right_idx = max(range(len(merged)), key=lambda k: merged[k]["bbox"][2] if merged[k].get("bbox") else -1)
+
+                if merged[left_idx].get("bbox"):
+                    x1, y1, x2, y2 = merged[left_idx]["bbox"]
+                    merged[left_idx]["bbox"] = (int(px1), int(y1), int(x2), int(y2))
+                if merged[right_idx].get("bbox"):
+                    x1, y1, x2, y2 = merged[right_idx]["bbox"]
+                    merged[right_idx]["bbox"] = (int(x1), int(y1), int(px2), int(y2))
+
         out.extend(merged)
 
     # Keep stable reading order across parents for plotting/debugging.
