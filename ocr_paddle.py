@@ -58,27 +58,6 @@ def _page_to_dict(page):
     return raw
 
 
-def _to_jsonable(obj):
-    """
-    Make Paddle page output pickle/json safe by converting arrays/objects to plain types.
-    Drops `vis_fonts` because it may contain non-serializable objects.
-    """
-    if obj is None or isinstance(obj, (str, int, float, bool)):
-        return obj
-    if hasattr(obj, "tolist"):
-        return _to_jsonable(obj.tolist())
-    if isinstance(obj, dict):
-        out = {}
-        for k, v in obj.items():
-            if k == "vis_fonts":
-                continue
-            out[k] = _to_jsonable(v)
-        return out
-    if isinstance(obj, (list, tuple)):
-        return [_to_jsonable(v) for v in obj]
-    return str(obj)
-
-
 def _get_paddle_device(device="auto"):
     if device and device != "auto":
         return device
@@ -97,7 +76,8 @@ def get_paddleocr_reader(lang="de", device="auto", ocr_version="PP-OCRv5", retur
     paddle_device = _get_paddle_device(device)
     print(f"Initializing PaddleOCR (lang={lang}, device={paddle_device}, ocr_version={ocr_version})...")
 
-    # For UI/screen recordings, disable document preprocessing stages.
+    # For UI/screen recordings, disable document preprocessing stages and use
+    # stricter detection/recognition thresholds to reduce waveform/UI noise.
     reader = PaddleOCR(
         lang=lang,
         device=paddle_device,
@@ -106,7 +86,12 @@ def get_paddleocr_reader(lang="de", device="auto", ocr_version="PP-OCRv5", retur
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
-        text_rec_score_thresh=0.0,
+        text_det_limit_side_len=1536,
+        text_det_limit_type="max",
+        text_det_thresh=0.3,
+        text_det_box_thresh=0.7,
+        text_det_unclip_ratio=1.6,
+        text_rec_score_thresh=0.6,
     )
     print("PaddleOCR reader initialized.")
     return reader
@@ -326,8 +311,6 @@ def run_paddleocr_on_frame(frame_path, reader):
     frame_idx = int("".join(filter(str.isdigit, frame_name)))
 
     page_results = reader.predict(frame_path)
-    raw_pages = []
-    page_summaries = []
     parent_boxes = []
     word_boxes_raw = []
 
@@ -335,13 +318,6 @@ def run_paddleocr_on_frame(frame_path, reader):
         page_dict = _page_to_dict(page)
         if not page_dict:
             continue
-        raw_pages.append(_to_jsonable(page_dict))
-        page_res = page_dict.get("res", page_dict)
-        page_summaries.append({
-            "page_index": page_res.get("page_index", page_dict.get("page_index")),
-            "num_parent_boxes": len(page_res.get("rec_texts", []) if page_res.get("rec_texts", []) is not None else []),
-            "num_word_boxes": len(page_res.get("text_word_boxes", []) if page_res.get("text_word_boxes", []) is not None else []),
-        })
         boxes = _collect_boxes_from_page(page_dict)
         parent_boxes.extend(boxes["parent_boxes"])
         word_boxes_raw.extend(boxes["word_boxes"])
@@ -353,8 +329,6 @@ def run_paddleocr_on_frame(frame_path, reader):
         "parent_boxes": parent_boxes,
         "word_boxes_raw": word_boxes_raw,
         "word_boxes": word_boxes,
-        "raw_pages": raw_pages,
-        "page_summaries": page_summaries,
     }
 
 
@@ -429,7 +403,7 @@ def plot_frame_boxes(image_path, frame_result, output_path=None, show_labels=Fal
     """
     Plot parent boxes (green) and word boxes (red) on an image.
     """
-    img = cv2.imread(str(image_path))
+    img = cv2.imread(str(image_path)).copy()
     if img is None:
         raise FileNotFoundError(f"Could not read image: {image_path}")
 
@@ -440,9 +414,9 @@ def plot_frame_boxes(image_path, frame_result, output_path=None, show_labels=Fal
             continue
         x1, y1, x2, y2 = bbox
         cv2.rectangle(img, (x1, y1), (x2, y2), (80, 220, 80), 2)
-        if show_labels:
-            txt = str(box.get("text", ""))[:30]
-            cv2.putText(img, txt, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 220, 80), 1, cv2.LINE_AA)
+        # if show_labels:
+        #     txt = str(box.get("text", ""))[:30]
+        #     cv2.putText(img, txt, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 220, 80), 1, cv2.LINE_AA)
 
     # Word boxes: red
     for box in frame_result.get("word_boxes", []):
