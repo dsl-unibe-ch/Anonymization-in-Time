@@ -105,6 +105,18 @@ class VideoProcessorGUI:
         self.ocr_langs_var = tk.StringVar(value="en de")
         ttk.Entry(params_frame, textvariable=self.ocr_langs_var, width=20).grid(
             row=0, column=3, sticky=tk.W, padx=(10, 0), pady=2)
+
+        # OCR backend
+        ttk.Label(params_frame, text="OCR Engine:").grid(row=1, column=2, sticky=tk.W, pady=2)
+        self.ocr_engine_var = tk.StringVar(value="easyocr")
+        ocr_engine_combo = ttk.Combobox(
+            params_frame,
+            textvariable=self.ocr_engine_var,
+            values=["easyocr", "paddleocr"],
+            state="readonly",
+            width=16
+        )
+        ocr_engine_combo.grid(row=1, column=3, sticky=tk.W, padx=(10, 0), pady=2)
         
         # SAM3 device
         ttk.Label(params_frame, text="SAM3 Device:").grid(row=1, column=0, sticky=tk.W, pady=2)
@@ -272,18 +284,19 @@ class VideoProcessorGUI:
             return
         
         ocr_languages = self.ocr_langs_var.get().split()
+        ocr_engine = self.ocr_engine_var.get()
         sam3_prompt = self.sam3_prompt_var.get()
         sam3_device = self.sam3_device_var.get()
         
         # Start processing in background thread
         thread = threading.Thread(
             target=self._processing_thread,
-            args=(frame_step, ocr_languages, sam3_prompt, sam3_device),
+            args=(frame_step, ocr_languages, ocr_engine, sam3_prompt, sam3_device),
             daemon=True
         )
         thread.start()
     
-    def _processing_thread(self, frame_step, ocr_languages, 
+    def _processing_thread(self, frame_step, ocr_languages, ocr_engine,
                           sam3_prompt, sam3_device):
         """Background thread for processing videos"""
         # Redirect stdout to log
@@ -311,6 +324,7 @@ class VideoProcessorGUI:
                     output_base_dir=self.output_dir,
                     dict_path=self.dict_path,
                     ocr_languages=ocr_languages,
+                    ocr_engine=ocr_engine,
                     sam3_prompt=sam3_prompt,
                     sam3_device=sam3_device,
                     frame_step=frame_step,
@@ -325,6 +339,7 @@ class VideoProcessorGUI:
                     output_base_dir=self.output_dir,
                     dict_path=self.dict_path,
                     ocr_languages=ocr_languages,
+                    ocr_engine=ocr_engine,
                     sam3_prompt=sam3_prompt,
                     sam3_device=sam3_device,
                     frame_step=frame_step,

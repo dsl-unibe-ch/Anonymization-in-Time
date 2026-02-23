@@ -10,7 +10,7 @@ Each video gets its own folder with:
 - ocr.pkl (OCR detections with track_ids)
 - sam3.pkl (SAM3 masks with track_ids)
 - transitions.txt (scene transition ranges)
-- boxes.pkl (intermediate OCR boxes)
+- boxes_<ocr_engine>.pkl (intermediate OCR boxes, backend-specific cache)
 - detected_masks*.pkl (intermediate SAM3 results)
 """
 
@@ -86,7 +86,7 @@ def reset_cuda_on_error(device: str | None = None):
 def process_single_video(video_path, output_base_dir, dict_path, 
                         ocr_languages=["en", "de"], ocr_workers=4,
                         sam3_prompt="profile image, profile picture", sam3_batch_size=2,
-                        sam3_device='auto', frame_step=1, 
+                        sam3_device='auto', frame_step=1, ocr_engine="easyocr",
                         extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
     """
     Process a single video through the complete pipeline.
@@ -95,12 +95,13 @@ def process_single_video(video_path, output_base_dir, dict_path,
         video_path (str or Path): Path to the video file
         output_base_dir (str or Path): Base directory for all outputs
         dict_path (str or Path): Path to JSON file with names to detect
-        ocr_languages (list): Languages for EasyOCR
+        ocr_languages (list): OCR language hints
         ocr_workers (int): Number of parallel workers for OCR
         sam3_prompt (str): Text prompt for SAM3 segmentation
         sam3_batch_size (int): Batch size for SAM3 inference
         sam3_device (str): Device for SAM3 ('auto', 'cuda', 'mps', or 'cpu')
         frame_step (int): Step between frames to extract
+        ocr_engine (str): OCR backend ('easyocr' or 'paddleocr')
         extract_frames (bool): Whether to extract frames from video
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
@@ -153,7 +154,7 @@ def process_single_video(video_path, output_base_dir, dict_path,
     
     # Step 2: Run OCR
     if run_ocr:
-        print(f"\n[2/4] Running OCR detection...")
+        print(f"\n[2/4] Running OCR detection ({ocr_engine})...")
         try:
             process_video_ocr(
                 video_path=video_path,
@@ -162,7 +163,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
                 languages=ocr_languages,
                 num_workers=ocr_workers,
                 extract_frames=False,  # Already extracted
-                frame_step=frame_step
+                frame_step=frame_step,
+                ocr_engine=ocr_engine
             )
             ocr_pkl = video_output_dir / "ocr.pkl"
             results['ocr_pkl'] = str(ocr_pkl)
@@ -248,7 +250,7 @@ def process_single_video(video_path, output_base_dir, dict_path,
 def process_multiple_videos(video_paths, output_base_dir, dict_path,
                            ocr_languages=["en", "de"], ocr_workers=4,
                            sam3_prompt="profile image, profile picture", sam3_batch_size=2,
-                           sam3_device='auto', frame_step=1,
+                           sam3_device='auto', frame_step=1, ocr_engine="easyocr",
                            extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
     """
     Process multiple videos through the complete pipeline.
@@ -257,12 +259,13 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
         video_paths (list): List of paths to video files
         output_base_dir (str or Path): Base directory for all outputs
         dict_path (str or Path): Path to JSON file with names to detect
-        ocr_languages (list): Languages for EasyOCR
+        ocr_languages (list): OCR language hints
         ocr_workers (int): Number of parallel workers for OCR
         sam3_prompt (str): Text prompt for SAM3 segmentation
         sam3_batch_size (int): Batch size for SAM3 inference
         sam3_device (str): Device for SAM3 ('auto', 'cuda', 'mps', or 'cpu')
         frame_step (int): Step between frames to extract
+        ocr_engine (str): OCR backend ('easyocr' or 'paddleocr')
         extract_frames (bool): Whether to extract frames from videos
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
@@ -295,6 +298,7 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                 dict_path=dict_path,
                 ocr_languages=ocr_languages,
                 ocr_workers=ocr_workers,
+                ocr_engine=ocr_engine,
                 sam3_prompt=sam3_prompt,
                 sam3_batch_size=sam3_batch_size,
                 sam3_device=sam3_device_resolved,
@@ -359,6 +363,8 @@ def main():
                        help='Languages for OCR (default: en de)')
     parser.add_argument('--ocr_workers', type=int, default=4,
                        help='Number of parallel workers for OCR (default: 4)')
+    parser.add_argument('--ocr_engine', type=str, default='easyocr', choices=['easyocr', 'paddleocr'],
+                       help='OCR backend to use (default: easyocr)')
     
     # SAM3 options
     parser.add_argument('--sam3_prompt', type=str, default="profile image, profile picture",
@@ -410,6 +416,7 @@ def main():
             dict_path=args.dict_path,
             ocr_languages=args.ocr_languages,
             ocr_workers=args.ocr_workers,
+            ocr_engine=args.ocr_engine,
             sam3_prompt=args.sam3_prompt,
             sam3_batch_size=args.sam3_batch_size,
             sam3_device=args.sam3_device,
@@ -426,6 +433,7 @@ def main():
             dict_path=args.dict_path,
             ocr_languages=args.ocr_languages,
             ocr_workers=args.ocr_workers,
+            ocr_engine=args.ocr_engine,
             sam3_prompt=args.sam3_prompt,
             sam3_batch_size=args.sam3_batch_size,
             sam3_device=args.sam3_device,

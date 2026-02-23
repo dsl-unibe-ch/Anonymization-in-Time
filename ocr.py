@@ -8,10 +8,10 @@ import pickle
 import json
 import numpy as np
 import unicodedata
+from typing import Any
 from tqdm import tqdm
 from difflib import SequenceMatcher
 import cv2
-import easyocr
 from joblib import Parallel, delayed
 from pathlib import Path
 
@@ -29,13 +29,13 @@ def _bbox_to_int_tuple(bbox):
     )
 
 def select_device():
-    """Select best available device for OCR (EasyOCR GPU requires CUDA)."""
+    """Select best available device for OCR."""
     device = resolve_device("auto")
     use_gpu = True if device in ['cuda', 'mps'] else False
     if device == 'cuda':
-        print("Using CUDA device for EasyOCR.")
+        print("Using CUDA device for OCR.")
     elif device == 'mps':
-        print("Using MPS device for EasyOCR.")
+        print("Using MPS device for OCR.")
     else:
         print("GPU not available. Using CPU.")
     return device, use_gpu
@@ -47,19 +47,82 @@ def get_easyocr_reader(languages):
     Returns:
         easyocr.Reader: Initialized EasyOCR reader instance
     """
+    try:
+        import easyocr
+    except Exception as e:
+        raise ImportError(
+            "EasyOCR is not installed. Install it or choose ocr_engine='paddleocr'."
+        ) from e
+
     device, use_gpu = select_device()
     print("Initializing EasyOCR reader...")
     EASYOCR_READER = easyocr.Reader(languages, gpu=use_gpu)
     print("EasyOCR reader initialized.")
     return EASYOCR_READER
 
-def extract_text_with_easyocr(image: np.ndarray, reader: easyocr.Reader, min_confidence: float = 0.5) -> list:
+def _resolve_paddle_language(languages):
+    """Resolve a PaddleOCR language code from a list of language hints."""
+    if not languages:
+        return "en"
+    if isinstance(languages, str):
+        return languages.lower()
+    normalized = [str(lang).lower().strip() for lang in languages if str(lang).strip()]
+    if not normalized:
+        return "en"
+    # PaddleOCR accepts a single language code. Prefer English if present.
+    if "en" in normalized:
+        return "en"
+    return normalized[0]
+
+def get_paddleocr_reader(languages):
+    """
+    Initialize PaddleOCR reader.
+    
+    Returns:
+        paddleocr.PaddleOCR: Initialized PaddleOCR reader instance
+    """
+    try:
+        from paddleocr import PaddleOCR
+    except Exception as e:
+        raise ImportError(
+            "PaddleOCR is not installed. Install it or choose ocr_engine='easyocr'."
+        ) from e
+
+    device, _ = 'cuda', 0 #select_device()
+    paddle_lang = _resolve_paddle_language(languages)
+    # PaddleOCR>=3 uses `device` (e.g., 'cpu', 'gpu:0').
+    paddle_device = "gpu:0" if device == "cuda" else "cpu"
+    print(f"Initializing PaddleOCR reader (lang={paddle_lang}, device={paddle_device})...")
+    # Disable Paddle's document preprocessor for chat/screen-recording frames.
+    # The doc orientation + unwarping stages can distort UI screenshots.
+    reader = PaddleOCR(
+        lang=paddle_lang,
+        device=paddle_device,
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+    )
+    print("PaddleOCR reader initialized.")
+    return reader
+
+def get_ocr_reader(languages, ocr_engine="easyocr"):
+    """
+    Initialize OCR reader for the requested backend.
+    """
+    engine = (ocr_engine or "easyocr").lower().strip()
+    if engine == "easyocr":
+        return get_easyocr_reader(languages)
+    if engine == "paddleocr":
+        return get_paddleocr_reader(languages)
+    raise ValueError(f"Unsupported ocr_engine: {ocr_engine}")
+
+def extract_text_with_easyocr(image: np.ndarray, reader: Any, min_confidence: float = 0.5) -> list:
     """
     Extract text from an image using EasyOCR.
     
     Args:
         image (np.ndarray): Input image.
-        reader (easyocr.Reader): Initialized EasyOCR reader.
+        reader: Initialized EasyOCR reader.
         min_confidence (float): Minimum confidence threshold for detections.
         
     Returns:
@@ -72,13 +135,9 @@ def extract_text_with_easyocr(image: np.ndarray, reader: easyocr.Reader, min_con
     results = reader.readtext(
         processed_image, 
         paragraph=False,
-        # width_ths=0.6,       # Slightly tighter width merging
-        # height_ths=0.6,      # Slightly tighter height merging
         text_threshold=0.6,  # Lower threshold to catch fainter text
         low_text=0.35,       # Lower low_text to catch fainter text
-        # link_threshold=0.3,  # Tighter linking
         canvas_size=2560,    # Larger canvas for better detection
-        # mag_ratio=1.0,       # Default magnification
         adjust_contrast=0.5  # Enhance contrast for better detection
     )
     
@@ -112,6 +171,175 @@ def extract_text_with_easyocr(image: np.ndarray, reader: easyocr.Reader, min_con
             })
     
     return detections
+
+def _extract_detections_from_paddle_result(result, min_confidence: float, scale_factor: float) -> list:
+    """Normalize PaddleOCR output into TiT detection dicts."""
+    detections = []
+    if not result:
+        return detections
+    
+    def to_xyxy(bbox):
+        if bbox is None:
+            return None
+        if hasattr(bbox, "tolist"):
+            bbox = bbox.tolist()
+        if not isinstance(bbox, (list, tuple)):
+            return None
+        if len(bbox) == 4 and all(not isinstance(v, (list, tuple)) for v in bbox):
+            x1, y1, x2, y2 = bbox
+            return float(x1), float(y1), float(x2), float(y2)
+        if len(bbox) >= 4 and isinstance(bbox[0], (list, tuple)):
+            try:
+                x_coords = [float(point[0]) for point in bbox]
+                y_coords = [float(point[1]) for point in bbox]
+            except Exception:
+                return None
+            return min(x_coords), min(y_coords), max(x_coords), max(y_coords)
+        return None
+    
+    def append_detection(text, confidence, xyxy):
+        if not text:
+            return
+        try:
+            confidence = float(confidence)
+        except Exception:
+            confidence = 0.0
+        if confidence < min_confidence:
+            return
+        if xyxy is None:
+            return
+        
+        x_start, y_start, x_end, y_end = [int(round(v)) for v in xyxy]
+        if scale_factor != 1:
+            x_start = int(round(x_start / scale_factor))
+            y_start = int(round(y_start / scale_factor))
+            x_end = int(round(x_end / scale_factor))
+            y_end = int(round(y_end / scale_factor))
+        
+        detections.append({
+            'text': str(text).strip(),
+            'bbox': (x_start, y_start, x_end, y_end),
+            'confidence': confidence,
+            'original_bbox': (x_start, y_start, x_end, y_end)
+        })
+
+    # Paddle may return nested shapes depending on version/input type.
+    candidate_lines = result
+    if isinstance(candidate_lines, (list, tuple)) and len(candidate_lines) == 1 and isinstance(candidate_lines[0], (list, tuple)):
+        first = candidate_lines[0]
+        if first and isinstance(first[0], (list, tuple)):
+            candidate_lines = first
+
+    for item in candidate_lines:
+        # PaddleOCR>=3 returns OCRResult objects (or dicts) with a nested `res`.
+        item_dict = None
+        if isinstance(item, dict):
+            item_dict = item
+        elif hasattr(item, "res"):
+            try:
+                item_dict = {"res": getattr(item, "res")}
+            except Exception:
+                item_dict = None
+        elif hasattr(item, "json"):
+            try:
+                raw_json = getattr(item, "json")
+                if callable(raw_json):
+                    raw_json = raw_json()
+                if isinstance(raw_json, str):
+                    item_dict = json.loads(raw_json)
+                elif isinstance(raw_json, dict):
+                    item_dict = raw_json
+            except Exception:
+                item_dict = None
+        
+        if isinstance(item_dict, dict):
+            payload = item_dict.get("res", item_dict)
+            if isinstance(payload, dict):
+                texts = payload.get("rec_texts") or payload.get("texts") or []
+                scores = payload.get("rec_scores") or payload.get("scores") or []
+                polys = (
+                    payload.get("rec_polys")
+                    or payload.get("dt_polys")
+                    or payload.get("polys")
+                    or []
+                )
+                
+                if isinstance(texts, str):
+                    texts = [texts]
+                if not isinstance(texts, (list, tuple)):
+                    texts = []
+                if not isinstance(scores, (list, tuple)):
+                    scores = []
+                if not isinstance(polys, (list, tuple)):
+                    polys = []
+                
+                for idx, text in enumerate(texts):
+                    xyxy = to_xyxy(polys[idx]) if idx < len(polys) else None
+                    conf = scores[idx] if idx < len(scores) else 1.0
+                    append_detection(text, conf, xyxy)
+                continue
+        
+        # Legacy PaddleOCR format: [bbox, (text, confidence)]
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        bbox = item[0]
+        text_info = item[1]
+        if not isinstance(text_info, (list, tuple)) or len(text_info) < 2:
+            continue
+        xyxy = to_xyxy(bbox)
+        append_detection(text_info[0], text_info[1], xyxy)
+
+    return detections
+
+def _ensure_three_channel_uint8(image: np.ndarray) -> np.ndarray:
+    """
+    Ensure image is uint8 HxWx3 for PaddleOCR v3 pipelines.
+    """
+    if image is None:
+        return image
+
+    arr = np.asarray(image)
+    if arr.ndim == 2:
+        arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    elif arr.ndim == 3:
+        channels = arr.shape[2]
+        if channels == 1:
+            arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+        elif channels == 4:
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+        elif channels != 3:
+            # Keep first 3 channels as a conservative fallback.
+            arr = arr[:, :, :3]
+    else:
+        raise ValueError(f"Unsupported image shape for OCR: {arr.shape}")
+
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+    return np.ascontiguousarray(arr)
+
+def extract_text_with_paddleocr(image: np.ndarray, reader: Any, min_confidence: float = 0.5) -> list:
+    """
+    Extract text from an image using PaddleOCR.
+    """
+    # processed_image, scale_factor = preprocess_image_for_ocr(image)
+    processed_image = _ensure_three_channel_uint8(image)
+    if hasattr(reader, "predict"):
+        result = reader.predict(processed_image)
+    else:
+        result = reader.ocr(processed_image)
+    return _extract_detections_from_paddle_result(result, min_confidence, 1.0)
+
+def extract_text_with_backend(image: np.ndarray, reader: Any, ocr_engine="easyocr", min_confidence: float = 0.5) -> list:
+    """
+    Dispatch OCR extraction to selected backend.
+    """
+    engine = (ocr_engine or "easyocr").lower().strip()
+    if engine == "easyocr":
+        return extract_text_with_easyocr(image, reader, min_confidence=min_confidence)
+    if engine == "paddleocr":
+        return extract_text_with_paddleocr(image, reader, min_confidence=min_confidence)
+    raise ValueError(f"Unsupported ocr_engine: {ocr_engine}")
 
 def preprocess_image_for_ocr(
     image: np.ndarray,
@@ -199,7 +427,7 @@ def preprocess_image_for_ocr(
 
     return pass_a, scale_factor
 
-def process_frame(frame_path, reader, min_confidence=0.3):
+def process_frame(frame_path, reader, min_confidence=0.3, ocr_engine="easyocr"):
     """
     Process a single frame to detect text boxes using EasyOCR.
     
@@ -218,11 +446,11 @@ def process_frame(frame_path, reader, min_confidence=0.3):
     frame_name = os.path.splitext(os.path.basename(frame_path))[0]
     frame_idx = int(''.join(filter(str.isdigit, frame_name)))
  
-    detections = extract_text_with_easyocr(frame, reader, min_confidence)
+    detections = extract_text_with_backend(frame, reader, ocr_engine=ocr_engine, min_confidence=min_confidence)
 
     return frame_idx, detections
 
-def process_frames_sequential(frames_dir, languages):
+def process_frames_sequential(frames_dir, languages, ocr_engine="easyocr"):
     """
     Process frames sequentially (GPU-safe).
     
@@ -240,11 +468,11 @@ def process_frames_sequential(frames_dir, languages):
     
     print(f"Found {len(frame_paths)} frames in {frames_dir}")
 
-    reader = get_easyocr_reader(languages)
+    reader = get_ocr_reader(languages, ocr_engine=ocr_engine)
     
     frame_boxes = {}
     for frame_path in tqdm(frame_paths, desc="Processing Frames"):
-        result = process_frame(frame_path, reader)
+        result = process_frame(frame_path, reader, ocr_engine=ocr_engine)
         if result is not None:
             frame_idx, detections = result
             frame_boxes[frame_idx] = detections
@@ -253,31 +481,77 @@ def process_frames_sequential(frames_dir, languages):
 
 
 # Keep alias for backward compatibility
-def process_frames_parallel(frames_dir, languages, num_workers=-1, force_cpu=False):
+def process_frames_parallel(frames_dir, languages, num_workers=-1, force_cpu=False, ocr_engine="easyocr"):
     """Alias for process_frames_sequential (parallel removed due to CUDA issues)."""
-    return process_frames_sequential(frames_dir, languages)
+    return process_frames_sequential(frames_dir, languages, ocr_engine=ocr_engine)
 
-def merge_split_names(frame_boxes, names_dict, x_threshold=50):
+def merge_line_boxes(frame_boxes, x_threshold=20):
     """
-    Merge horizontally adjacent boxes if their combined text matches a name in the dictionary.
-    This helps with composite names that EasyOCR might split into multiple boxes.
+    Merge horizontally adjacent boxes that likely belong to the same text line segment.
+    Boxes are merged only when they are on the same line, have similar heights, and are within a horizontal gap threshold.
     
     Args:
         frame_boxes (dict): Dictionary of frame indices to list of bounding boxes
-        names_dict (dict): Dictionary of names to match against
         x_threshold (int): Maximum horizontal distance between boxes to consider merging
         
     Returns:
         dict: Updated frame_boxes with merged entries
     """
     merged_frame_boxes = {}
-    
-    # Pre-process names for faster matching
-    normalized_names = set()
-    for name in names_dict.keys():
-        # Add various normalized forms
-        normalized_names.add(name.lower().strip())
-        normalized_names.add(unicodedata.normalize('NFD', name).encode('ascii', 'ignore').decode("utf-8").lower().strip())
+
+    def _height(b):
+        return float(b['bbox'][3] - b['bbox'][1])
+
+    def _vertical_overlap_ratio(a, b):
+        ay1, ay2 = a['bbox'][1], a['bbox'][3]
+        by1, by2 = b['bbox'][1], b['bbox'][3]
+        overlap = max(0.0, min(ay2, by2) - max(ay1, by1))
+        min_h = max(1.0, min(_height(a), _height(b)))
+        return overlap / min_h
+
+    def _height_similarity_ok(a, b, max_rel_diff=0.20):
+        ha = max(1.0, _height(a))
+        hb = max(1.0, _height(b))
+        return abs(ha - hb) / max(ha, hb) <= max_rel_diff
+
+    def _same_line_and_mergeable(a, b):
+        # Require strong vertical overlap and similar text height.
+        if _vertical_overlap_ratio(a, b) < 0.6:
+            return False
+        if not _height_similarity_ok(a, b):
+            return False
+
+        # b should be to the right of a (allow slight overlap from OCR jitter).
+        gap = b['bbox'][0] - a['bbox'][2]
+        if gap < -10 or gap > x_threshold:
+            return False
+        return True
+
+    def _merge_two(a, b):
+        ax1, ay1, ax2, ay2 = _bbox_to_int_tuple(a['bbox'])
+        bx1, by1, bx2, by2 = _bbox_to_int_tuple(b['bbox'])
+        new_x1 = min(ax1, bx1)
+        new_y1 = min(ay1, by1)
+        new_x2 = max(ax2, bx2)
+        new_y2 = max(ay2, by2)
+
+        merged = a.copy()
+        merged['bbox'] = (new_x1, new_y1, new_x2, new_y2)
+        merged['text'] = ((a.get('text', '') or '').strip() + " " + (b.get('text', '') or '').strip()).strip()
+        merged['confidence'] = (float(a.get('confidence', 1.0)) + float(b.get('confidence', 1.0))) / 2.0
+
+        # Keep original_bbox as a union too, so downstream normalization sees a stable parent.
+        a_orig = a.get('original_bbox', a['bbox'])
+        b_orig = b.get('original_bbox', b['bbox'])
+        aox1, aoy1, aox2, aoy2 = _bbox_to_int_tuple(a_orig)
+        box1, boy1, box2, boy2 = _bbox_to_int_tuple(b_orig)
+        merged['original_bbox'] = (
+            min(aox1, box1),
+            min(aoy1, boy1),
+            max(aox2, box2),
+            max(aoy2, boy2),
+        )
+        return merged
 
     for frame_idx, boxes in frame_boxes.items():
         if not boxes:
@@ -290,88 +564,33 @@ def merge_split_names(frame_boxes, names_dict, x_threshold=50):
         
         merged_boxes = []
         used_indices = set()
-        
+
         i = 0
         while i < len(sorted_boxes):
             if i in used_indices:
                 i += 1
                 continue
-                
-            box1 = sorted_boxes[i]
-            merged = False
-            
-            # Look ahead for a merge candidate
-            # We only check the next few boxes to avoid O(N^2) on large sets, 
-            # though usually N is small per frame
-            for j in range(i + 1, min(i + 10, len(sorted_boxes))):
-                if j in used_indices:
-                    continue
-                    
-                box2 = sorted_boxes[j]
-                
-                # Check vertical alignment (y-overlap)
-                y1_a, y2_a = box1['bbox'][1], box1['bbox'][3]
-                y1_b, y2_b = box2['bbox'][1], box2['bbox'][3]
-                
-                # Calculate vertical overlap
-                overlap_y1 = max(y1_a, y1_b)
-                overlap_y2 = min(y2_a, y2_b)
-                overlap_h = max(0, overlap_y2 - overlap_y1)
-                
-                min_height = min(y2_a - y1_a, y2_b - y1_b)
-                
-                # Require significant vertical overlap (they should be on the same line)
-                if min_height > 0 and overlap_h / min_height < 0.5:
-                    continue
-                    
-                # Check horizontal proximity
-                # box2 should be to the right of box1
-                x2_a = box1['bbox'][2]
-                x1_b = box2['bbox'][0]
-                
-                dist = x1_b - x2_a
-                
-                # Allow small negative distance (slight overlap) or positive distance up to threshold
-                if -10 <= dist <= x_threshold:
-                    # Candidate for merge
-                    combined_text = (box1['text'] + " " + box2['text']).strip()
-                    
-                    # Check if combined text matches a name
-                    is_match = False
-                    norm_combined = combined_text.lower().strip()
-                    norm_combined_ascii = unicodedata.normalize('NFD', norm_combined).encode('ascii', 'ignore').decode("utf-8")
-                    
-                    # Check if the combined text is a substring of any name or vice versa
-                    # This is a loose check, strict filtering happens later
-                    for name in normalized_names:
-                        if name in norm_combined or norm_combined in name or \
-                           name in norm_combined_ascii or norm_combined_ascii in name:
-                            is_match = True
-                            break
-                    
-                    if is_match:
-                        # Merge them
-                        new_x1 = min(box1['bbox'][0], box2['bbox'][0])
-                        new_y1 = min(box1['bbox'][1], box2['bbox'][1])
-                        new_x2 = max(box1['bbox'][2], box2['bbox'][2])
-                        new_y2 = max(box1['bbox'][3], box2['bbox'][3])
-                        
-                        new_box = {
-                            'bbox': (new_x1, new_y1, new_x2, new_y2),
-                            'text': combined_text,
-                            'confidence': (box1['confidence'] + box2['confidence']) / 2,
-                            'original_bbox': (new_x1, new_y1, new_x2, new_y2)
-                        }
-                        
-                        # Update box1 to be the merged box and continue checking for more merges with this new box
-                        # This allows merging "Mario" + "Rossi" + "Verdi"
-                        box1 = new_box
-                        used_indices.add(j)
-                        merged = True
-                        # Don't break, keep looking for more parts of the name
-            
-            merged_boxes.append(box1)
+
+            current = sorted_boxes[i]
             used_indices.add(i)
+
+            # Greedy chain-merge to the right while boxes remain on the same line and
+            # have similar heights. This keeps words from the same phrase together
+            # without merging across different UI text sizes.
+            merged_any = True
+            while merged_any:
+                merged_any = False
+                for j in range(i + 1, min(i + 10, len(sorted_boxes))):
+                    if j in used_indices:
+                        continue
+                    candidate = sorted_boxes[j]
+                    if _same_line_and_mergeable(current, candidate):
+                        current = _merge_two(current, candidate)
+                        used_indices.add(j)
+                        merged_any = True
+                        break
+
+            merged_boxes.append(current)
             i += 1
             
         merged_frame_boxes[frame_idx] = merged_boxes
@@ -1107,31 +1326,35 @@ def ocr_boxes_to_unified(frame_boxes, tracks=None):
         unified[frame_idx] = unified_list
     return unified
 
-def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"], num_workers=4, 
-                      extract_frames=True, frame_step=1):
+def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"], num_workers=4,
+                      extract_frames=True, frame_step=1, ocr_engine="easyocr"):
     """
     Process a single video for OCR detection.
     
     Args:
         video_path (str or Path): Path to the video file
-        output_dir (str or Path): Directory to save outputs (frames/, ocr.pkl, boxes.pkl)
+        output_dir (str or Path): Directory to save outputs (frames/, ocr.pkl, boxes_<ocr_engine>.pkl)
         dict_path (str or Path): Path to JSON file with names to detect
-        languages (list): Languages for EasyOCR (default: ["en", "de"])
+        languages (list): OCR language hints (default: ["en", "de"])
         num_workers (int): Number of parallel workers for processing
         extract_frames (bool): Whether to extract frames from video (default: True)
         frame_step (int): Step between frames to extract (default: 1)
+        ocr_engine (str): OCR backend ('easyocr' or 'paddleocr')
         
     Returns:
         dict: Unified OCR data with track_ids
     """
     output_dir = Path(output_dir)
-    boxes_pkl_path = output_dir / "boxes.pkl"
+    ocr_engine = (ocr_engine or "easyocr").lower().strip()
+    boxes_pkl_path = output_dir / f"boxes_{ocr_engine}.pkl"
+    legacy_boxes_pkl_path = output_dir / "boxes.pkl"
     frames_dir = output_dir / "frames"
     output_pkl_path = output_dir / "ocr.pkl"
     
     print(f"\n{'='*60}")
     print(f"Processing video: {video_path}")
     print(f"Output directory: {output_dir}")
+    print(f"OCR engine: {ocr_engine}")
     print(f"{'='*60}\n")
     
     # Extract frames if requested
@@ -1145,19 +1368,26 @@ def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"],
         names_to_detect = json.load(f)
     
     # Process frames or load existing boxes
-    try:
+    loaded_boxes = False
+    if boxes_pkl_path.exists():
         with open(boxes_pkl_path, "rb") as f:
             frame_boxes = pickle.load(f)
+        loaded_boxes = True
         print(f"Loaded existing text boxes from {boxes_pkl_path}")
-    except:
-        # Process frames to detect text boxes
-        frame_boxes = process_frames_parallel(frames_dir, languages, num_workers)
+    elif ocr_engine == "easyocr" and legacy_boxes_pkl_path.exists():
+        with open(legacy_boxes_pkl_path, "rb") as f:
+            frame_boxes = pickle.load(f)
+        loaded_boxes = True
+        print(f"Loaded legacy EasyOCR text boxes from {legacy_boxes_pkl_path}")
+
+    if not loaded_boxes:
+        frame_boxes = process_frames_parallel(frames_dir, languages, num_workers, ocr_engine=ocr_engine)
         with open(boxes_pkl_path, "wb") as f:
             pickle.dump(frame_boxes, f)
         print(f"Saved detected text boxes to {boxes_pkl_path}")
     
     # Apply OCR pipeline
-    frame_boxes = merge_split_names(frame_boxes, names_to_detect)
+    frame_boxes = merge_line_boxes(frame_boxes)
     
     # Normalize box heights first for easier tracking
     normalized_boxes, height_clusters = normalize_box_heights(frame_boxes)
@@ -1201,8 +1431,8 @@ def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"],
     return unified
 
 
-def process_videos_batch(video_paths, output_base_dir, dict_path, languages=["en", "de"], 
-                        num_workers=4, extract_frames=True, frame_step=1):
+def process_videos_batch(video_paths, output_base_dir, dict_path, languages=["en", "de"],
+                        num_workers=4, extract_frames=True, frame_step=1, ocr_engine="easyocr"):
     """
     Process multiple videos for OCR detection in batch.
     
@@ -1210,10 +1440,11 @@ def process_videos_batch(video_paths, output_base_dir, dict_path, languages=["en
         video_paths (list): List of paths to video files
         output_base_dir (str or Path): Base directory for outputs (each video gets a subfolder)
         dict_path (str or Path): Path to JSON file with names to detect
-        languages (list): Languages for EasyOCR (default: ["en", "de"])
+        languages (list): OCR language hints (default: ["en", "de"])
         num_workers (int): Number of parallel workers for processing
         extract_frames (bool): Whether to extract frames from videos (default: True)
         frame_step (int): Step between frames to extract (default: 1)
+        ocr_engine (str): OCR backend ('easyocr' or 'paddleocr')
         
     Returns:
         dict: Dictionary mapping video names to their unified OCR data
@@ -1242,7 +1473,8 @@ def process_videos_batch(video_paths, output_base_dir, dict_path, languages=["en
                 languages=languages,
                 num_workers=num_workers,
                 extract_frames=extract_frames,
-                frame_step=frame_step
+                frame_step=frame_step,
+                ocr_engine=ocr_engine
             )
             results[video_name] = unified
             print(f"✓ Successfully processed {video_name}")
