@@ -882,7 +882,7 @@ def filter_boxes_by_names(
             out = []
             for b in frame.get(source_key, []) or []:
                 b2 = b.copy()
-                b2["to_show"] = False
+                b2["to_show"] = True
                 b2.setdefault("name", "")
                 b2.setdefault("alterego", "")
                 out.append(b2)
@@ -1044,6 +1044,61 @@ def filter_boxes_by_names(
         frame[output_key] = frame_results
 
     return updated
+
+
+def ocr_boxes_to_unified_paddle(frame_data, source_key="word_boxes"):
+    """
+    Convert Paddle OCR frame_data to the same unified OCR format used by `ocr.py`.
+
+    Output format:
+    {frame_idx: [
+        {
+            "bbox": (x1, y1, x2, y2),
+            "parent_box": (x1, y1, x2, y2) or None,
+            "score": float,
+            "text": str,
+            "alterego": str,
+            "mask": None,
+            "source": "ocr",
+            "to_show": bool,
+            "track_id": int or None,
+        }, ...
+    ]}
+    """
+    unified = {}
+
+    for frame_idx, frame in frame_data.items():
+        # Keep only actual frame entries (int keys).
+        if not isinstance(frame_idx, int):
+            continue
+
+        boxes = frame.get(source_key, []) or []
+        unified_list = []
+
+        for box in boxes:
+            bbox = box.get("bbox") or box.get("original_bbox")
+            if not bbox:
+                continue
+
+            bbox_int = _bbox_to_int_tuple(bbox)
+            parent_box = box.get("parent_box", None)
+            parent_box_int = _bbox_to_int_tuple(parent_box) if parent_box is not None else None
+
+            unified_list.append({
+                "bbox": bbox_int,
+                "parent_box": parent_box_int,
+                "score": float(box.get("confidence", 1.0)),
+                "text": str(box.get("text", "") or ""),
+                "alterego": str(box.get("alterego", "") or ""),
+                "mask": None,
+                "source": "ocr",
+                "to_show": bool(box.get("to_show", True)),
+                "track_id": box.get("track_id", None),
+            })
+
+        unified[frame_idx] = unified_list
+
+    return unified
 
 
 def _sorted_frame_paths(frames_dir):
