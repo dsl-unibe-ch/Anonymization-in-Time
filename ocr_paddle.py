@@ -14,6 +14,7 @@ from difflib import SequenceMatcher
 import cv2
 from tqdm import tqdm
 
+import ocr_postprocess as _ocr_postprocess
 from utils import extract_video_frames
 
 
@@ -67,6 +68,18 @@ def _page_to_dict(page):
 def _get_paddle_device(device="auto"):
     if device and device != "auto":
         return device
+    try:
+        import paddle
+        if paddle.device.is_compiled_with_cuda():
+            try:
+                dev = paddle.device.get_device()
+                if isinstance(dev, str) and dev.startswith("gpu"):
+                    return dev
+            except Exception:
+                pass
+            return "gpu:0"
+    except Exception:
+        pass
     try:
         import torch
         if torch.cuda.is_available():
@@ -1546,6 +1559,22 @@ def main():
         out_plot = Path(args.output_dir) / f"frame_{args.plot_frame:04d}_paddle_boxes.jpg"
         plot_frame_boxes(img_path, frame_result, output_path=out_plot, show_labels=False)
         print(f"Saved debug plot to {out_plot}")
+
+
+# Transitional re-export: use the shared postprocessing module while keeping the
+# existing `ocr_paddle.py` notebook/API surface stable.
+normalize_parent_boxes_by_line = _ocr_postprocess.normalize_parent_boxes_by_line
+cluster_parent_box_heights = _ocr_postprocess.cluster_parent_box_heights
+postprocess_word_boxes = _ocr_postprocess.postprocess_word_boxes
+
+apply_parent_box_normalization = _ocr_postprocess.apply_parent_box_normalization
+apply_parent_height_clustering = _ocr_postprocess.apply_parent_height_clustering
+apply_word_box_postprocessing = _ocr_postprocess.apply_word_box_postprocessing
+apply_box_stabilization = _ocr_postprocess.apply_box_stabilization
+apply_parent_constrained_word_stabilization = _ocr_postprocess.apply_parent_constrained_word_stabilization
+
+filter_boxes_by_names = _ocr_postprocess.filter_boxes_by_names
+ocr_boxes_to_unified_paddle = _ocr_postprocess.ocr_boxes_to_unified_paddle
 
 
 if __name__ == "__main__":
