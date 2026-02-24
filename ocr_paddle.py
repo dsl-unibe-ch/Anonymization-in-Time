@@ -2,6 +2,7 @@ import json
 import os
 import pickle
 import re
+import statistics
 import string
 from pathlib import Path
 
@@ -221,6 +222,136 @@ def _merge_token_boxes(a, b, join_text=""):
     return merged
 
 
+def normalize_parent_boxes_by_line(
+    parent_boxes,
+    x_gap_threshold=40,
+    height_rel_tol=0.20,
+    center_y_tol_factor=0.50,
+    min_vertical_overlap_ratio=0.50,
+):
+    """
+    Normalize parent box heights line-by-line without merging boxes.
+
+    Boxes are grouped only if they are:
+    - horizontally close (or overlapping)
+    - vertically aligned (same line)
+    - similar height (strict, to avoid merging timestamps with message text)
+
+    For each group, only y1/y2 are normalized. x1/x2 stay unchanged.
+    """
+    if not parent_boxes:
+        return []
+
+    boxes = [b.copy() for b in parent_boxes]
+    valid = [i for i, b in enumerate(boxes) if b.get("bbox")]
+
+    def _metrics(bbox):
+        x1, y1, x2, y2 = bbox
+        h = max(1, y2 - y1)
+        cy = (y1 + y2) / 2.0
+        return x1, y1, x2, y2, h, cy
+
+    def _compatible(i, j):
+        bi = boxes[i].get("bbox")
+        bj = boxes[j].get("bbox")
+        if not bi or not bj:
+            return False
+
+        xi1, yi1, xi2, yi2, hi, cyi = _metrics(bi)
+        xj1, yj1, xj2, yj2, hj, cyj = _metrics(bj)
+
+        rel_h_diff = abs(hi - hj) / float(max(hi, hj))
+        if rel_h_diff > height_rel_tol:
+            return False
+
+        center_y_diff = abs(cyi - cyj)
+        if center_y_diff > center_y_tol_factor * min(hi, hj):
+            return False
+
+        overlap_y = max(0, min(yi2, yj2) - max(yi1, yj1))
+        if overlap_y / float(min(hi, hj)) < min_vertical_overlap_ratio:
+            return False
+
+        # Horizontal distance between boxes (0 if overlapping on x).
+        gap = max(0, max(xi1, xj1) - min(xi2, xj2))
+        if gap > x_gap_threshold:
+            return False
+
+        return True
+
+    visited = set()
+    for start in sorted(valid, key=lambda i: ((boxes[i]["bbox"][1] + boxes[i]["bbox"][3]) / 2.0, boxes[i]["bbox"][0])):
+        if start in visited:
+            continue
+
+        cluster = []
+        stack = [start]
+        visited.add(start)
+
+        while stack:
+            cur = stack.pop()
+            cluster.append(cur)
+            for j in valid:
+                if j in visited:
+                    continue
+                if _compatible(cur, j):
+                    visited.add(j)
+                    stack.append(j)
+
+        if len(cluster) < 2:
+            continue
+
+        ys1 = []
+        ys2 = []
+        hs = []
+        cys = []
+        for idx in cluster:
+            x1, y1, x2, y2 = boxes[idx]["bbox"]
+            h = max(1, y2 - y1)
+            ys1.append(y1)
+            ys2.append(y2)
+            hs.append(h)
+            cys.append((y1 + y2) / 2.0)
+
+        target_h = int(round(statistics.median(hs)))
+        target_cy = float(statistics.median(cys))
+        target_y1 = int(round(target_cy - target_h / 2.0))
+        target_y2 = int(round(target_cy + target_h / 2.0))
+
+        # Keep target within the observed cluster vertical span to avoid drift.
+        target_y1 = max(min(ys1), target_y1)
+        target_y2 = min(max(ys2), target_y2)
+        if target_y2 <= target_y1:
+            continue
+
+        for idx in cluster:
+            x1, y1, x2, y2 = boxes[idx]["bbox"]
+            boxes[idx]["bbox"] = (int(x1), int(target_y1), int(x2), int(target_y2))
+
+    return boxes
+
+
+def _sync_word_parent_boxes(word_boxes, parent_boxes):
+    """Update each word box's parent_box after parent-box normalization."""
+    if not word_boxes:
+        return []
+
+    parent_bbox_by_idx = {}
+    for p in parent_boxes:
+        if p.get("bbox") is None:
+            continue
+        parent_bbox_by_idx[p.get("parent_index")] = p.get("bbox")
+
+    out = []
+    for w in word_boxes:
+        w2 = w.copy()
+        pi = w2.get("parent_index")
+        if pi in parent_bbox_by_idx:
+            w2["parent_box"] = parent_bbox_by_idx[pi]
+        out.append(w2)
+    return out
+
+
 def postprocess_word_boxes(word_boxes):
     """
     Clean Paddle word boxes within each parent line:
@@ -339,14 +470,37 @@ def run_paddleocr_on_frame(frame_path, reader):
         parent_boxes.extend(boxes["parent_boxes"])
         word_boxes_raw.extend(boxes["word_boxes"])
 
-    word_boxes = postprocess_word_boxes(word_boxes_raw)
-
     return frame_idx, {
         "frame_path": str(frame_path),
-        "parent_boxes": parent_boxes,
+        "parent_boxes_raw": [b.copy() for b in parent_boxes],
+        "parent_boxes": [b.copy() for b in parent_boxes],
         "word_boxes_raw": word_boxes_raw,
-        "word_boxes": word_boxes,
+        "word_boxes": [],
     }
+
+
+def apply_parent_box_normalization(frame_data, **normalize_kwargs):
+    """
+    Apply line-wise parent-box normalization to all frames in a saved result dict.
+    Keeps `parent_boxes_raw` untouched and writes normalized boxes to `parent_boxes`.
+    """
+    for frame in frame_data.values():
+        raw_parent_boxes = frame.get("parent_boxes_raw") or frame.get("parent_boxes") or []
+        frame["parent_boxes"] = normalize_parent_boxes_by_line(raw_parent_boxes, **normalize_kwargs)
+    return frame_data
+
+
+def apply_word_box_postprocessing(frame_data):
+    """
+    Build final `word_boxes` from `word_boxes_raw`, using the current `parent_boxes`
+    (typically already normalized).
+    """
+    for frame in frame_data.values():
+        parent_boxes = frame.get("parent_boxes") or frame.get("parent_boxes_raw") or []
+        word_boxes_raw = frame.get("word_boxes_raw", [])
+        word_boxes_with_synced_parents = _sync_word_parent_boxes(word_boxes_raw, parent_boxes)
+        frame["word_boxes"] = postprocess_word_boxes(word_boxes_with_synced_parents)
+    return frame_data
 
 
 def _sorted_frame_paths(frames_dir):
@@ -386,12 +540,15 @@ def process_video_paddleocr(
     device="auto",
     ocr_version="PP-OCRv5",
     save_pickle=True,
+    save_raw_pickle=True,
 ):
     """
     Minimal PaddleOCR pass:
     - ensure frames exist
     - run PaddleOCR on all frames
-    - collect parent + word boxes
+    - collect raw parent + word boxes
+    - normalize parent boxes line-wise
+    - postprocess word boxes
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -406,6 +563,15 @@ def process_video_paddleocr(
     for frame_path in tqdm(frame_paths, desc="PaddleOCR Frames"):
         frame_idx, result = run_paddleocr_on_frame(str(frame_path), reader)
         frame_data[frame_idx] = result
+
+    if save_raw_pickle:
+        raw_out_path = output_dir / "boxes_paddleocr_words_raw.pkl"
+        with open(raw_out_path, "wb") as f:
+            pickle.dump(frame_data, f)
+        print(f"Saved raw PaddleOCR parent/word boxes to {raw_out_path}")
+
+    apply_parent_box_normalization(frame_data)
+    apply_word_box_postprocessing(frame_data)
 
     if save_pickle:
         out_path = output_dir / "boxes_paddleocr_words.pkl"
