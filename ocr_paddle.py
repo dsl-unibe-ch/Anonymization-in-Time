@@ -204,7 +204,17 @@ def _union_bboxes(b1, b2):
 
 
 def _is_space_token(text):
-    return isinstance(text, str) and text != "" and text.strip() == ""
+    if not isinstance(text, str):
+        return False
+    # Paddle can emit empty strings, NBSPs, and zero-width separators as tokens.
+    cleaned = (
+        text.replace("\u00A0", " ")  # non-breaking space
+            .replace("\u200B", "")   # zero-width space
+            .replace("\u200C", "")   # zero-width non-joiner
+            .replace("\u200D", "")   # zero-width joiner
+            .replace("\uFEFF", "")   # zero-width no-break space / BOM
+    )
+    return cleaned.strip() == ""
 
 
 def _is_punctuation_token(text):
@@ -480,10 +490,13 @@ def _sync_word_parent_boxes(word_boxes, parent_boxes):
         return []
 
     parent_bbox_by_idx = {}
+    parent_track_by_idx = {}
     for p in parent_boxes:
         if p.get("bbox") is None:
             continue
         parent_bbox_by_idx[p.get("parent_index")] = p.get("bbox")
+        if p.get("track_id") is not None:
+            parent_track_by_idx[p.get("parent_index")] = p.get("track_id")
 
     out = []
     for w in word_boxes:
@@ -491,6 +504,8 @@ def _sync_word_parent_boxes(word_boxes, parent_boxes):
         pi = w2.get("parent_index")
         if pi in parent_bbox_by_idx:
             w2["parent_box"] = parent_bbox_by_idx[pi]
+        if pi in parent_track_by_idx:
+            w2["track_id"] = parent_track_by_idx[pi]
         out.append(w2)
     return out
 
@@ -585,6 +600,226 @@ def cluster_parent_box_heights(parent_boxes, min_confidence=0.7, height_clusters
         normalized.append(b2)
 
     return normalized, clusters
+
+
+def _adjust_word_boxes_using_parent(word_boxes):
+    """
+    Make final word boxes inherit stable parent geometry.
+
+    This reduces flicker after parent stabilization by:
+    - forcing word y1/y2 to parent y1/y2
+    - clamping word x1/x2 to parent x-range
+    """
+    if not word_boxes:
+        return []
+
+    out = []
+    for box in word_boxes:
+        b = box.copy()
+        bbox = b.get("bbox")
+        pbox = b.get("parent_box")
+        if bbox and pbox:
+            x1, y1, x2, y2 = _bbox_to_int_tuple(bbox)
+            px1, py1, px2, py2 = _bbox_to_int_tuple(pbox)
+            x1 = max(px1, x1)
+            x2 = min(px2, x2)
+            if x2 <= x1:
+                x1, x2 = px1, px2
+            b["bbox"] = (int(x1), int(py1), int(x2), int(py2))
+        out.append(b)
+    return out
+
+
+def _normalize_token_for_tracking(text):
+    if not isinstance(text, str):
+        return ""
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    return text.strip().lower()
+
+
+def _relative_x_span(word_bbox, parent_bbox):
+    if not word_bbox or not parent_bbox:
+        return None
+    wx1, _, wx2, _ = _bbox_to_int_tuple(word_bbox)
+    px1, _, px2, _ = _bbox_to_int_tuple(parent_bbox)
+    pw = max(1, px2 - px1)
+    rx1 = (wx1 - px1) / float(pw)
+    rx2 = (wx2 - px1) / float(pw)
+    return (rx1, rx2)
+
+
+def _project_relative_x_span(rel_span, parent_bbox):
+    if rel_span is None or parent_bbox is None:
+        return None
+    rx1, rx2 = rel_span
+    px1, py1, px2, py2 = _bbox_to_int_tuple(parent_bbox)
+    pw = max(1, px2 - px1)
+    rx1 = max(0.0, min(1.0, float(rx1)))
+    rx2 = max(0.0, min(1.0, float(rx2)))
+    if rx2 <= rx1:
+        mid = max(0.0, min(1.0, (rx1 + rx2) / 2.0))
+        rx1 = max(0.0, mid - 0.005)
+        rx2 = min(1.0, mid + 0.005)
+    x1 = int(round(px1 + rx1 * pw))
+    x2 = int(round(px1 + rx2 * pw))
+    if x2 <= x1:
+        x2 = min(px2, x1 + 1)
+        x1 = max(px1, x2 - 1)
+    return (x1, py1, x2, py2)
+
+
+def _stabilize_relative_x_span(curr_rel, prev_rel, rel_movement_threshold=0.01):
+    """
+    1D stabilization in parent-relative coordinates.
+    Parent motion is already stabilized separately, so we only stabilize x-span.
+    """
+    if curr_rel is None or prev_rel is None:
+        return curr_rel or prev_rel
+
+    curr_x1, curr_x2 = float(curr_rel[0]), float(curr_rel[1])
+    prev_x1, prev_x2 = float(prev_rel[0]), float(prev_rel[1])
+    curr_w = max(1e-6, curr_x2 - curr_x1)
+    prev_w = max(1e-6, prev_x2 - prev_x1)
+    curr_c = (curr_x1 + curr_x2) / 2.0
+    prev_c = (prev_x1 + prev_x2) / 2.0
+    movement = abs(curr_c - prev_c)
+
+    # Static relative center: preserve previous span unless current grows a lot.
+    if movement < rel_movement_threshold:
+        width_change = abs(curr_w - prev_w) / max(prev_w, 1e-6)
+        if width_change > 0.15:
+            return (min(curr_x1, prev_x1), max(curr_x2, prev_x2))
+        return (prev_x1, prev_x2)
+
+    # Moving text within same parent: keep current center but avoid sudden shrink.
+    width_diff = abs(curr_w - prev_w) / max(prev_w, 1e-6)
+    final_w = max(prev_w, curr_w) if width_diff > 0.2 else curr_w
+    return (curr_c - final_w / 2.0, curr_c + final_w / 2.0)
+
+
+def apply_parent_constrained_word_stabilization(
+    frame_data,
+    max_gap=6,
+    rel_movement_threshold=0.01,
+    rel_position_tol=0.20,
+    text_similarity_threshold=0.85,
+):
+    """
+    Stabilize word boxes inside each stabilized parent track.
+
+    Uses parent `track_id` as the constraint. This avoids global word tracking and
+    stabilizes only x-coordinates in parent-relative space. y1/y2 stay equal to the
+    stabilized parent box.
+    """
+    updated = _clone_frame_data(frame_data)
+    frame_indices = sorted([k for k in updated.keys() if isinstance(k, int)])
+
+    # Track per parent track_id using the last stabilized word group.
+    parent_track_state = {}  # parent_track_id -> {"frame_idx": int, "words": [boxes]}
+
+    for frame_idx in frame_indices:
+        frame = updated[frame_idx]
+        words = [b.copy() for b in frame.get("word_boxes", [])]
+        if not words:
+            continue
+
+        groups = {}
+        passthrough = []
+        for w in words:
+            parent_track_id = w.get("track_id", None)
+            if parent_track_id is None or not w.get("parent_box") or not w.get("bbox"):
+                passthrough.append(w)
+                continue
+            groups.setdefault(parent_track_id, []).append(w)
+
+        stabilized_groups = []
+
+        for parent_track_id, group_words in groups.items():
+            group_words.sort(key=lambda b: (b["bbox"][0], b["bbox"][2]))
+            state = parent_track_state.get(parent_track_id)
+
+            if not state or (frame_idx - state["frame_idx"] > max_gap):
+                stabilized_groups.extend(group_words)
+                parent_track_state[parent_track_id] = {"frame_idx": frame_idx, "words": [g.copy() for g in group_words]}
+                continue
+
+            prev_words = [g.copy() for g in state["words"]]
+            prev_words.sort(key=lambda b: (b["bbox"][0], b["bbox"][2]))
+
+            # Fast path: same token count and same normalized sequence -> pair by index.
+            curr_norm = [_normalize_token_for_tracking(w.get("text", "")) for w in group_words]
+            prev_norm = [_normalize_token_for_tracking(w.get("text", "")) for w in prev_words]
+            matched_pairs = []
+
+            if len(group_words) == len(prev_words) and curr_norm == prev_norm:
+                matched_pairs = list(zip(range(len(prev_words)), range(len(group_words))))
+            else:
+                # Greedy parent-constrained matching by text + relative x position.
+                used_prev = set()
+                for j, curr_w in enumerate(group_words):
+                    curr_txt = _normalize_token_for_tracking(curr_w.get("text", ""))
+                    curr_rel = _relative_x_span(curr_w.get("bbox"), curr_w.get("parent_box"))
+                    if curr_rel is None:
+                        continue
+                    curr_center = (curr_rel[0] + curr_rel[1]) / 2.0
+
+                    best_i = None
+                    best_score = None
+                    for i, prev_w in enumerate(prev_words):
+                        if i in used_prev:
+                            continue
+                        prev_rel = _relative_x_span(prev_w.get("bbox"), prev_w.get("parent_box"))
+                        if prev_rel is None:
+                            continue
+                        prev_center = (prev_rel[0] + prev_rel[1]) / 2.0
+                        rel_dist = abs(curr_center - prev_center)
+                        if rel_dist > rel_position_tol:
+                            continue
+
+                        prev_txt = _normalize_token_for_tracking(prev_w.get("text", ""))
+                        text_sim = SequenceMatcher(None, prev_txt, curr_txt).ratio()
+                        if curr_txt and prev_txt and text_sim < text_similarity_threshold:
+                            continue
+
+                        # Prefer better text match, then closer relative position.
+                        score = (2.0 * text_sim) - rel_dist
+                        if best_score is None or score > best_score:
+                            best_score = score
+                            best_i = i
+
+                    if best_i is not None:
+                        used_prev.add(best_i)
+                        matched_pairs.append((best_i, j))
+
+            # Apply x-span stabilization for matched pairs.
+            stabilized_group = [w.copy() for w in group_words]
+            for prev_i, curr_j in matched_pairs:
+                prev_w = prev_words[prev_i]
+                curr_w = stabilized_group[curr_j]
+                prev_rel = _relative_x_span(prev_w.get("bbox"), prev_w.get("parent_box"))
+                curr_rel = _relative_x_span(curr_w.get("bbox"), curr_w.get("parent_box"))
+                stable_rel = _stabilize_relative_x_span(
+                    curr_rel,
+                    prev_rel,
+                    rel_movement_threshold=rel_movement_threshold,
+                )
+                projected = _project_relative_x_span(stable_rel, curr_w.get("parent_box"))
+                if projected is not None:
+                    curr_w["bbox"] = projected
+                    # keep a word-level track id only for debugging if parent track exists
+                    curr_w["word_track_parent_id"] = parent_track_id
+
+            stabilized_groups.extend(stabilized_group)
+            parent_track_state[parent_track_id] = {"frame_idx": frame_idx, "words": [g.copy() for g in stabilized_group]}
+
+        final_words = stabilized_groups + passthrough
+        final_words.sort(
+            key=lambda b: ((b["bbox"][1] + b["bbox"][3]) / 2.0, b["bbox"][0]) if b.get("bbox") else (10**9, 10**9)
+        )
+        frame["word_boxes"] = final_words
+
+    return updated
 
 
 def postprocess_word_boxes(word_boxes):
@@ -684,6 +919,9 @@ def postprocess_word_boxes(word_boxes):
 
         out.extend(merged)
 
+    # Final safety cleanup: drop any blank-like tokens that survived earlier steps.
+    out = [b for b in out if not _is_space_token(b.get("text", ""))]
+
     # Keep stable reading order across parents for plotting/debugging.
     out.sort(key=lambda b: ((b["bbox"][1] + b["bbox"][3]) / 2.0, b["bbox"][0]) if b.get("bbox") else (10**9, 10**9))
     return out
@@ -760,103 +998,193 @@ def apply_word_box_postprocessing(frame_data):
         parent_boxes = frame.get("parent_boxes") or frame.get("parent_boxes_raw") or []
         word_boxes_raw = frame.get("word_boxes_raw", [])
         word_boxes_with_synced_parents = _sync_word_parent_boxes(word_boxes_raw, parent_boxes)
-        frame["word_boxes"] = postprocess_word_boxes(word_boxes_with_synced_parents)
+        word_boxes = postprocess_word_boxes(word_boxes_with_synced_parents)
+        frame["word_boxes"] = _adjust_word_boxes_using_parent(word_boxes)
     return updated
 
 def apply_box_stabilization(
     frame_data,
+    box_key="parent_boxes",
     max_gap=6,
-    position_threshold=60,
-    size_threshold=0.45,
-    iou_threshold=0.1,
-    movement_threshold=3,
+    position_threshold=50,
+    size_threshold=0.4,
 ):
     """
-    Temporal stabilization for parent boxes (recommended primary stabilization).
-
-    Tracks `parent_boxes` across frames and stabilizes coordinates while preserving
-    text and adding `track_id` to parent boxes.
+    Temporal stabilization for boxes across frames using the same logic as
+    `enhanced_temporal_tracking` in `ocr.py`.
     """
-    updated = _clone_frame_data(frame_data)
-    frame_indices = sorted([k for k in updated.keys() if isinstance(k, int)])
+    def _enhanced_temporal_tracking_local(frame_boxes):
+        def can_track(box1, box2):
+            bbox1, bbox2 = box1["bbox"], box2["bbox"]
 
-    stabilized_by_frame = {frame_idx: [] for frame_idx in frame_indices}
-    tracks = []  # list of [(frame_idx, box_dict), ...]
+            center1 = ((bbox1[0] + bbox1[2]) / 2, (bbox1[1] + bbox1[3]) / 2)
+            center2 = ((bbox2[0] + bbox2[2]) / 2, (bbox2[1] + bbox2[3]) / 2)
+            x_distance = abs(center1[0] - center2[0])
+            y_distance = abs(center1[1] - center2[1])
 
-    for frame_idx in frame_indices:
-        current_boxes = [b.copy() for b in updated.get(frame_idx, {}).get("parent_boxes", [])]
-        unmatched = list(enumerate(current_boxes))
-        if not unmatched:
-            continue
+            area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
+            area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
+            size_diff = abs(area1 - area2) / max(area1, area2) if max(area1, area2) > 0 else 0
 
-        for track in tracks:
-            if not track:
-                continue
-            last_frame, last_box = track[-1]
-            if frame_idx - last_frame > max_gap:
-                continue
+            text1 = box1.get("text", "") or box1.get("alterego", "")
+            text2 = box2.get("text", "") or box2.get("alterego", "")
+            text_sim = SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
 
-            best_j = None
-            best_score = None
-            for j, box in unmatched:
-                if not _can_track_temporally(
-                    last_box,
-                    box,
-                    position_threshold=position_threshold,
-                    size_threshold=size_threshold,
-                    iou_threshold=iou_threshold,
-                ):
-                    continue
-                iou = _bbox_iou(last_box.get("bbox"), box.get("bbox"))
-                text_bonus = 1.0 if str(last_box.get("text", "")).strip() == str(box.get("text", "")).strip() else 0.0
-                score = (2.0 * iou) + text_bonus
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_j = j
-
-            if best_j is not None:
-                picked = None
-                new_unmatched = []
-                for j, box in unmatched:
-                    if j == best_j and picked is None:
-                        picked = box
-                    else:
-                        new_unmatched.append((j, box))
-                track.append((frame_idx, picked))
-                unmatched = new_unmatched
-
-        for _, box in unmatched:
-            tracks.append([(frame_idx, box)])
-
-    for track_id, track in enumerate(tracks):
-        if not track:
-            continue
-
-        best_text = max(
-            ((str(b.get("text", "")), float(b.get("confidence", 0.0))) for _, b in track),
-            key=lambda x: x[1],
-        )[0]
-
-        prev_stable_bbox = None
-        for frame_idx, box in track:
-            b = box.copy()
-            if prev_stable_bbox is None:
-                stable_bbox = _bbox_to_int_tuple(b.get("bbox"))
+            if text_sim >= 0.9:
+                return x_distance < position_threshold * 1.5 and y_distance < position_threshold * 2 and size_diff < size_threshold * 1.5
+            elif text_sim >= 0.75:
+                return x_distance < position_threshold and y_distance < position_threshold * 1.5 and size_diff < size_threshold
             else:
-                stable_bbox = _stabilize_bbox(b.get("bbox"), prev_stable_bbox, movement_threshold=movement_threshold)
+                return x_distance < position_threshold * 0.5 and y_distance < position_threshold * 0.5 and size_diff < size_threshold * 0.8
 
-            b["bbox"] = stable_bbox
-            b["text"] = best_text
-            b["track_id"] = track_id
-            stabilized_by_frame[frame_idx].append(b)
-            prev_stable_bbox = stable_bbox
+        def stabilize_coordinates(current_bbox, prev_bbox, movement_threshold=3):
+            curr_x1, curr_y1, curr_x2, curr_y2 = current_bbox
+            prev_x1, prev_y1, prev_x2, prev_y2 = prev_bbox
 
-    for frame_idx in frame_indices:
-        stable_boxes = stabilized_by_frame.get(frame_idx, [])
-        stable_boxes.sort(
-            key=lambda b: ((b["bbox"][1] + b["bbox"][3]) / 2.0, b["bbox"][0]) if b.get("bbox") else (10**9, 10**9)
-        )
-        updated[frame_idx]["parent_boxes"] = stable_boxes
+            def union_bbox(a, b):
+                return (
+                    int(min(a[0], b[0])),
+                    int(min(a[1], b[1])),
+                    int(max(a[2], b[2])),
+                    int(max(a[3], b[3])),
+                )
+
+            curr_center_x = (curr_x1 + curr_x2) / 2
+            curr_center_y = (curr_y1 + curr_y2) / 2
+            prev_center_x = (prev_x1 + prev_x2) / 2
+            prev_center_y = (prev_y1 + prev_y2) / 2
+
+            x_movement = abs(curr_center_x - prev_center_x)
+            y_movement = abs(curr_center_y - prev_center_y)
+
+            curr_width = curr_x2 - curr_x1
+            curr_height = curr_y2 - curr_y1
+            prev_width = prev_x2 - prev_x1
+            prev_height = prev_y2 - prev_y1
+
+            if x_movement < movement_threshold and y_movement < movement_threshold:
+                width_change = abs(curr_width - prev_width) / max(1, prev_width)
+                height_change = abs(curr_height - prev_height) / max(1, prev_height)
+                if max(width_change, height_change) > 0.15:
+                    return union_bbox(current_bbox, prev_bbox)
+                return _bbox_to_int_tuple(prev_bbox)
+            elif y_movement < movement_threshold or y_movement < x_movement / 2:
+                stable_width = max(prev_width, curr_width)
+                stable_y1 = prev_y1
+                stable_y2 = prev_y2
+                stable_x1 = int(round(curr_center_x - stable_width / 2))
+                stable_x2 = stable_x1 + int(stable_width)
+                return (stable_x1, stable_y1, stable_x2, stable_y2)
+            elif x_movement < movement_threshold or x_movement < y_movement / 2:
+                stable_height = max(prev_height, curr_height)
+                stable_x1 = prev_x1
+                stable_x2 = prev_x2
+                stable_y1 = int(round(curr_center_y - stable_height / 2))
+                stable_y2 = stable_y1 + int(stable_height)
+                return (stable_x1, stable_y1, stable_x2, stable_y2)
+            else:
+                width_diff = abs(curr_width - prev_width) / prev_width if prev_width > 0 else 0
+                height_diff = abs(curr_height - prev_height) / prev_height if prev_height > 0 else 0
+                final_width = max(prev_width, curr_width) if width_diff > 0.2 else curr_width
+                final_height = max(prev_height, curr_height) if height_diff > 0.2 else curr_height
+                stable_x1 = int(round(curr_center_x - final_width / 2))
+                stable_y1 = int(round(curr_center_y - final_height / 2))
+                stable_x2 = stable_x1 + int(final_width)
+                stable_y2 = stable_y1 + int(final_height)
+                return (stable_x1, stable_y1, stable_x2, stable_y2)
+
+        if not frame_boxes:
+            return frame_boxes, []
+
+        frame_indices = sorted(frame_boxes.keys())
+        tracks = []
+        track_assignments = {}
+        stabilized_boxes = {frame_idx: [] for frame_idx in frame_indices}
+
+        for frame_idx in frame_indices:
+            current_boxes = frame_boxes[frame_idx]
+            unmatched_boxes = list(enumerate(current_boxes))
+            if not current_boxes:
+                continue
+
+            for track in tracks:
+                if not track:
+                    continue
+                last_frame, last_box = track[-1]
+                if frame_idx - last_frame > max_gap:
+                    continue
+
+                best_match = None
+                best_idx = None
+                for box_idx, box in unmatched_boxes:
+                    if can_track(last_box, box):
+                        if best_match is None:
+                            best_match = box
+                            best_idx = box_idx
+
+                if best_match is not None:
+                    track.append((frame_idx, best_match))
+                    unmatched_boxes = [(idx, box) for idx, box in unmatched_boxes if idx != best_idx]
+
+            for _, box in unmatched_boxes:
+                tracks.append([(frame_idx, box)])
+
+        for track_id, track in enumerate(tracks):
+            if len(track) < 2:
+                frame_idx, box = track[0]
+                box_idx_in_stabilized = len(stabilized_boxes[frame_idx])
+                stabilized_box = box.copy()
+                stabilized_box["track_id"] = track_id
+                stabilized_box["bbox"] = _bbox_to_int_tuple(stabilized_box["bbox"])
+                stabilized_boxes[frame_idx].append(stabilized_box)
+                track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id
+                continue
+
+            text_variants = [(box.get("text", ""), box.get("confidence", 0)) for _, box in track]
+            best_text = max(text_variants, key=lambda x: x[1])[0]
+
+            for i, (frame_idx, box) in enumerate(track):
+                box_idx_in_stabilized = len(stabilized_boxes[frame_idx])
+                if i == 0:
+                    stabilized_box = box.copy()
+                    stabilized_box["text"] = best_text
+                    stabilized_box["track_id"] = track_id
+                    stabilized_box["bbox"] = _bbox_to_int_tuple(stabilized_box["bbox"])
+                else:
+                    prev_frame, prev_box = track[i - 1]
+                    stabilized_prev_bbox = stabilized_boxes[prev_frame][-1]["bbox"]
+                    stabilized_bbox = stabilize_coordinates(box["bbox"], stabilized_prev_bbox)
+                    # For parent boxes, prioritize coverage over tightness, but do
+                    # not propagate width from previous frames (can explode on a bad
+                    # track match). Only prevent shrink relative to this frame's raw box.
+                    if box_key == "parent_boxes":
+                        sx1, sy1, sx2, sy2 = _bbox_to_int_tuple(stabilized_bbox)
+                        cx1, cy1, cx2, cy2 = _bbox_to_int_tuple(box["bbox"])
+                        stabilized_bbox = (min(sx1, cx1), sy1, max(sx2, cx2), sy2)
+                    stabilized_box = box.copy()
+                    stabilized_box["bbox"] = stabilized_bbox
+                    stabilized_box["text"] = best_text
+                    stabilized_box["track_id"] = track_id
+
+                stabilized_boxes[frame_idx].append(stabilized_box)
+                track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id
+
+        tracks_output = [[] for _ in range(len(tracks))]
+        for (frame_idx, box_idx), track_id in track_assignments.items():
+            tracks_output[track_id].append((frame_idx, box_idx))
+
+        return stabilized_boxes, tracks_output
+
+    updated = _clone_frame_data(frame_data)
+    frame_boxes = {}
+    for frame_idx, frame in updated.items():
+        if not isinstance(frame_idx, int):
+            continue
+        frame_boxes[frame_idx] = [b.copy() for b in frame.get(box_key, [])]
+
+    stabilized_boxes, _tracks = _enhanced_temporal_tracking_local(frame_boxes)
+    for frame_idx, boxes in stabilized_boxes.items():
+        updated[frame_idx][box_key] = boxes
 
     return updated
 
@@ -1172,8 +1500,10 @@ def process_video_paddleocr(
     frame_data = apply_parent_box_normalization(frame_data)
     frame_data = apply_parent_height_clustering(frame_data, min_confidence=0.7)
     if stabilize_boxes:
-        frame_data = apply_box_stabilization(frame_data)
+        frame_data = apply_box_stabilization(frame_data, box_key="parent_boxes")
     frame_data = apply_word_box_postprocessing(frame_data)
+    if stabilize_boxes:
+        frame_data = apply_parent_constrained_word_stabilization(frame_data)
 
     if save_pickle:
         out_path = output_dir / "boxes_paddleocr_words.pkl"
@@ -1193,6 +1523,7 @@ def plot_frame_boxes(image_path, frame_result, output_path=None, show_labels=Fal
         raise FileNotFoundError(f"Could not read image: {image_path}")
 
     # Parent boxes: green
+    print(f"number of parent boxes: {len(frame_result.get('parent_boxes', []))}")
     for box in frame_result.get("parent_boxes", []):
         bbox = box.get("bbox")
         if not bbox:
@@ -1204,7 +1535,8 @@ def plot_frame_boxes(image_path, frame_result, output_path=None, show_labels=Fal
         #     cv2.putText(img, txt, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 220, 80), 1, cv2.LINE_AA)
 
     # Word boxes: red
-    for box in frame_result.get("word_boxes", []):
+    print(f"number of word boxes: {len(frame_result.get('word_boxes', []))}")
+    for box in frame_result.get("word_boxes", "word_boxes_raw"):
         bbox = box.get("bbox")
         if not bbox:
             continue
