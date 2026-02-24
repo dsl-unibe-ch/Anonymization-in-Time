@@ -337,44 +337,6 @@ def _stabilize_bbox(curr_bbox, prev_bbox, movement_threshold=3):
     y1 = int(round(curr_cy - final_h / 2.0))
     return (int(x1), int(y1), int(x1 + final_w), int(y1 + final_h))
 
-
-def _can_track_temporally(prev_box, curr_box, position_threshold=50, size_threshold=0.4, iou_threshold=0.1):
-    """Check if two OCR boxes likely belong to the same temporal track."""
-    b1 = prev_box.get("bbox")
-    b2 = curr_box.get("bbox")
-    if not b1 or not b2:
-        return False
-
-    x1a, y1a, x2a, y2a = b1
-    x1b, y1b, x2b, y2b = b2
-    w1 = max(1, x2a - x1a)
-    h1 = max(1, y2a - y1a)
-    w2 = max(1, x2b - x1b)
-    h2 = max(1, y2b - y1b)
-
-    c1x, c1y = (x1a + x2a) / 2.0, (y1a + y2a) / 2.0
-    c2x, c2y = (x1b + x2b) / 2.0, (y1b + y2b) / 2.0
-    center_dist = ((c1x - c2x) ** 2 + (c1y - c2y) ** 2) ** 0.5
-    if center_dist > position_threshold:
-        return False
-
-    width_diff = abs(w1 - w2) / float(max(1, max(w1, w2)))
-    height_diff = abs(h1 - h2) / float(max(1, max(h1, h2)))
-    if max(width_diff, height_diff) > size_threshold:
-        return False
-
-    t1 = str(prev_box.get("text", "")).strip()
-    t2 = str(curr_box.get("text", "")).strip()
-    same_text = (t1 != "" and t1 == t2)
-
-    iou = _bbox_iou(b1, b2)
-    if same_text:
-        return iou >= 0.01 or center_dist <= position_threshold * 0.7
-
-    # If text changed (OCR jitter), require stronger geometric evidence.
-    return iou >= max(0.25, iou_threshold)
-
-
 def normalize_parent_boxes_by_line(
     parent_boxes,
     x_gap_threshold=40,
@@ -1518,9 +1480,10 @@ def plot_frame_boxes(image_path, frame_result, output_path=None, show_labels=Fal
     """
     Plot parent boxes (green) and word boxes (red) on an image.
     """
-    img = cv2.imread(str(image_path)).copy()
+    img = cv2.imread(str(image_path))
     if img is None:
         raise FileNotFoundError(f"Could not read image: {image_path}")
+    img = img.copy()
 
     # Parent boxes: green
     print(f"number of parent boxes: {len(frame_result.get('parent_boxes', []))}")
@@ -1536,7 +1499,8 @@ def plot_frame_boxes(image_path, frame_result, output_path=None, show_labels=Fal
 
     # Word boxes: red
     print(f"number of word boxes: {len(frame_result.get('word_boxes', []))}")
-    for box in frame_result.get("word_boxes", "word_boxes_raw"):
+    word_boxes_to_plot = frame_result.get("word_boxes") or frame_result.get("word_boxes_raw", [])
+    for box in word_boxes_to_plot:
         bbox = box.get("bbox")
         if not bbox:
             continue
