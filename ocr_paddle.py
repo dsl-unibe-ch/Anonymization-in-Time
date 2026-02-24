@@ -968,8 +968,8 @@ def apply_box_stabilization(
     frame_data,
     box_key="parent_boxes",
     max_gap=6,
-    position_threshold=50,
-    size_threshold=0.4,
+    position_threshold=35,
+    size_threshold=0.25,
 ):
     """
     Temporal stabilization for boxes across frames using the same logic as
