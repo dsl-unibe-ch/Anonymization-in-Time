@@ -4,6 +4,7 @@ import pickle
 import re
 import statistics
 import string
+import copy
 from pathlib import Path
 
 import cv2
@@ -222,6 +223,11 @@ def _merge_token_boxes(a, b, join_text=""):
     return merged
 
 
+def _clone_frame_data(frame_data):
+    """Return a deep-copied frame_data dict so stage functions stay pure."""
+    return copy.deepcopy(frame_data)
+
+
 def normalize_parent_boxes_by_line(
     parent_boxes,
     x_gap_threshold=40,
@@ -350,6 +356,98 @@ def _sync_word_parent_boxes(word_boxes, parent_boxes):
             w2["parent_box"] = parent_bbox_by_idx[pi]
         out.append(w2)
     return out
+
+
+def cluster_parent_box_heights(parent_boxes, min_confidence=0.7, height_clusters=None, max_clusters=4):
+    """
+    Normalize parent box heights to a small set of cluster heights.
+
+    Cluster centers are estimated from boxes with confidence >= min_confidence.
+    Boxes are then normalized to the nearest cluster height (all boxes, not just high-conf).
+    """
+    if not parent_boxes:
+        return [], []
+
+    boxes = [b.copy() for b in parent_boxes]
+
+    def _sanitize_clusters(vals):
+        out = []
+        for v in vals:
+            try:
+                out.append(max(1, int(round(float(v)))))
+            except Exception:
+                continue
+        return sorted(set(out))
+
+    if height_clusters is None:
+        heights = []
+        for b in boxes:
+            bbox = b.get("bbox")
+            if not bbox:
+                continue
+            conf = float(b.get("confidence", 0.0))
+            if conf < float(min_confidence):
+                continue
+            x1, y1, x2, y2 = bbox
+            h = int(round(float(y2 - y1)))
+            if h > 0:
+                heights.append(h)
+
+        if not heights:
+            return boxes, []
+
+        unique_heights = sorted(set(heights))
+        if len(unique_heights) == 1:
+            clusters = unique_heights
+        else:
+            # Prefer sklearn KMeans if available (same idea as ocr.py), otherwise
+            # fall back to the observed unique heights.
+            try:
+                import numpy as np
+                from sklearn.cluster import KMeans
+
+                n_clusters = min(max_clusters, len(unique_heights))
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+                kmeans.fit(np.array(heights).reshape(-1, 1))
+                clusters = _sanitize_clusters(kmeans.cluster_centers_.flatten())
+            except Exception:
+                clusters = unique_heights[:max_clusters]
+    else:
+        clusters = _sanitize_clusters(height_clusters)
+
+    if not clusters:
+        return boxes, []
+
+    normalized = []
+    for b in boxes:
+        bbox = b.get("bbox")
+        if not bbox:
+            normalized.append(b)
+            continue
+
+        x1, y1, x2, y2 = bbox
+        cur_h = int(round(float(y2 - y1)))
+        if cur_h <= 0:
+            normalized.append(b)
+            continue
+
+        target_h = min(clusters, key=lambda h: abs(h - cur_h))
+        cy = (float(y1) + float(y2)) / 2.0
+        new_y1 = int(round(cy - target_h / 2.0))
+        new_y2 = int(round(cy + target_h / 2.0))
+        if new_y2 <= new_y1:
+            new_y2 = new_y1 + max(1, int(target_h))
+
+        b2 = b.copy()
+        b2["bbox"] = (
+            int(round(float(x1))),
+            int(new_y1),
+            int(round(float(x2))),
+            int(new_y2),
+        )
+        normalized.append(b2)
+
+    return normalized, clusters
 
 
 def postprocess_word_boxes(word_boxes):
@@ -484,10 +582,35 @@ def apply_parent_box_normalization(frame_data, **normalize_kwargs):
     Apply line-wise parent-box normalization to all frames in a saved result dict.
     Keeps `parent_boxes_raw` untouched and writes normalized boxes to `parent_boxes`.
     """
-    for frame in frame_data.values():
+    updated = _clone_frame_data(frame_data)
+    for frame in updated.values():
         raw_parent_boxes = frame.get("parent_boxes_raw") or frame.get("parent_boxes") or []
         frame["parent_boxes"] = normalize_parent_boxes_by_line(raw_parent_boxes, **normalize_kwargs)
-    return frame_data
+    return updated
+
+
+def apply_parent_height_clustering(
+    frame_data,
+    min_confidence=0.7,
+    height_clusters=None,
+    max_clusters=4,
+):
+    """
+    Cluster parent-box heights per frame and normalize to the nearest cluster.
+    Uses only boxes with confidence >= min_confidence to estimate clusters.
+    """
+    updated = _clone_frame_data(frame_data)
+    for frame in updated.values():
+        src_boxes = frame.get("parent_boxes") or frame.get("parent_boxes_raw") or []
+        normalized_boxes, clusters = cluster_parent_box_heights(
+            src_boxes,
+            min_confidence=min_confidence,
+            height_clusters=height_clusters,
+            max_clusters=max_clusters,
+        )
+        frame["parent_boxes"] = normalized_boxes
+        frame["parent_height_clusters"] = clusters
+    return updated
 
 
 def apply_word_box_postprocessing(frame_data):
@@ -495,12 +618,13 @@ def apply_word_box_postprocessing(frame_data):
     Build final `word_boxes` from `word_boxes_raw`, using the current `parent_boxes`
     (typically already normalized).
     """
-    for frame in frame_data.values():
+    updated = _clone_frame_data(frame_data)
+    for frame in updated.values():
         parent_boxes = frame.get("parent_boxes") or frame.get("parent_boxes_raw") or []
         word_boxes_raw = frame.get("word_boxes_raw", [])
         word_boxes_with_synced_parents = _sync_word_parent_boxes(word_boxes_raw, parent_boxes)
         frame["word_boxes"] = postprocess_word_boxes(word_boxes_with_synced_parents)
-    return frame_data
+    return updated
 
 
 def _sorted_frame_paths(frames_dir):
@@ -570,8 +694,9 @@ def process_video_paddleocr(
             pickle.dump(frame_data, f)
         print(f"Saved raw PaddleOCR parent/word boxes to {raw_out_path}")
 
-    apply_parent_box_normalization(frame_data)
-    apply_word_box_postprocessing(frame_data)
+    frame_data = apply_parent_box_normalization(frame_data)
+    frame_data = apply_parent_height_clustering(frame_data, min_confidence=0.7)
+    frame_data = apply_word_box_postprocessing(frame_data)
 
     if save_pickle:
         out_path = output_dir / "boxes_paddleocr_words.pkl"
