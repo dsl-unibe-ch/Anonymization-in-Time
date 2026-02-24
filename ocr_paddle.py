@@ -228,6 +228,139 @@ def _clone_frame_data(frame_data):
     return copy.deepcopy(frame_data)
 
 
+def _bbox_to_int_tuple(bbox):
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = bbox
+    return (
+        int(round(float(x1))),
+        int(round(float(y1))),
+        int(round(float(x2))),
+        int(round(float(y2))),
+    )
+
+
+def _bbox_iou(b1, b2):
+    if not b1 or not b2:
+        return 0.0
+    ax1, ay1, ax2, ay2 = b1
+    bx1, by1, bx2, by2 = b2
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0, ix2 - ix1)
+    ih = max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    a_area = max(1, (ax2 - ax1) * (ay2 - ay1))
+    b_area = max(1, (bx2 - bx1) * (by2 - by1))
+    return inter / float(a_area + b_area - inter)
+
+
+def _stabilize_bbox(curr_bbox, prev_bbox, movement_threshold=3):
+    """
+    Frame-to-frame bbox stabilization to reduce jitter while avoiding shrinkage.
+    Returns integer bbox.
+    """
+    curr_bbox = _bbox_to_int_tuple(curr_bbox)
+    prev_bbox = _bbox_to_int_tuple(prev_bbox)
+    if not curr_bbox or not prev_bbox:
+        return curr_bbox or prev_bbox
+
+    cx1, cy1, cx2, cy2 = curr_bbox
+    px1, py1, px2, py2 = prev_bbox
+
+    curr_w = max(1, cx2 - cx1)
+    curr_h = max(1, cy2 - cy1)
+    prev_w = max(1, px2 - px1)
+    prev_h = max(1, py2 - py1)
+
+    curr_cx = (cx1 + cx2) / 2.0
+    curr_cy = (cy1 + cy2) / 2.0
+    prev_cx = (px1 + px2) / 2.0
+    prev_cy = (py1 + py2) / 2.0
+
+    dx = abs(curr_cx - prev_cx)
+    dy = abs(curr_cy - prev_cy)
+
+    # Nearly static: keep previous box unless current grows noticeably.
+    if dx < movement_threshold and dy < movement_threshold:
+        width_change = abs(curr_w - prev_w) / float(max(1, prev_w))
+        height_change = abs(curr_h - prev_h) / float(max(1, prev_h))
+        if max(width_change, height_change) > 0.15:
+            return (
+                int(min(cx1, px1)),
+                int(min(cy1, py1)),
+                int(max(cx2, px2)),
+                int(max(cy2, py2)),
+            )
+        return prev_bbox
+
+    # Predominantly horizontal motion: preserve Y and stable height.
+    if dy < movement_threshold or dy < dx / 2.0:
+        stable_h = max(prev_h, curr_h)
+        y1 = py1
+        y2 = y1 + stable_h
+        x1 = int(round(curr_cx - max(prev_w, curr_w) / 2.0))
+        x2 = x1 + max(prev_w, curr_w)
+        return (int(x1), int(y1), int(x2), int(y2))
+
+    # Predominantly vertical motion: preserve X and stable width.
+    if dx < movement_threshold or dx < dy / 2.0:
+        stable_w = max(prev_w, curr_w)
+        x1 = px1
+        x2 = x1 + stable_w
+        y1 = int(round(curr_cy - max(prev_h, curr_h) / 2.0))
+        y2 = y1 + max(prev_h, curr_h)
+        return (int(x1), int(y1), int(x2), int(y2))
+
+    # Diagonal / general motion: keep current center, prevent sudden shrink.
+    final_w = max(prev_w, curr_w) if abs(curr_w - prev_w) / float(max(1, prev_w)) > 0.2 else curr_w
+    final_h = max(prev_h, curr_h) if abs(curr_h - prev_h) / float(max(1, prev_h)) > 0.2 else curr_h
+    x1 = int(round(curr_cx - final_w / 2.0))
+    y1 = int(round(curr_cy - final_h / 2.0))
+    return (int(x1), int(y1), int(x1 + final_w), int(y1 + final_h))
+
+
+def _can_track_temporally(prev_box, curr_box, position_threshold=50, size_threshold=0.4, iou_threshold=0.1):
+    """Check if two OCR boxes likely belong to the same temporal track."""
+    b1 = prev_box.get("bbox")
+    b2 = curr_box.get("bbox")
+    if not b1 or not b2:
+        return False
+
+    x1a, y1a, x2a, y2a = b1
+    x1b, y1b, x2b, y2b = b2
+    w1 = max(1, x2a - x1a)
+    h1 = max(1, y2a - y1a)
+    w2 = max(1, x2b - x1b)
+    h2 = max(1, y2b - y1b)
+
+    c1x, c1y = (x1a + x2a) / 2.0, (y1a + y2a) / 2.0
+    c2x, c2y = (x1b + x2b) / 2.0, (y1b + y2b) / 2.0
+    center_dist = ((c1x - c2x) ** 2 + (c1y - c2y) ** 2) ** 0.5
+    if center_dist > position_threshold:
+        return False
+
+    width_diff = abs(w1 - w2) / float(max(1, max(w1, w2)))
+    height_diff = abs(h1 - h2) / float(max(1, max(h1, h2)))
+    if max(width_diff, height_diff) > size_threshold:
+        return False
+
+    t1 = str(prev_box.get("text", "")).strip()
+    t2 = str(curr_box.get("text", "")).strip()
+    same_text = (t1 != "" and t1 == t2)
+
+    iou = _bbox_iou(b1, b2)
+    if same_text:
+        return iou >= 0.01 or center_dist <= position_threshold * 0.7
+
+    # If text changed (OCR jitter), require stronger geometric evidence.
+    return iou >= max(0.25, iou_threshold)
+
+
 def normalize_parent_boxes_by_line(
     parent_boxes,
     x_gap_threshold=40,
@@ -627,6 +760,109 @@ def apply_word_box_postprocessing(frame_data):
     return updated
 
 
+def apply_word_box_stabilization(
+    frame_data,
+    max_gap=6,
+    position_threshold=50,
+    size_threshold=0.4,
+    iou_threshold=0.1,
+    movement_threshold=3,
+):
+    """
+    Temporal stabilization for final word boxes to reduce frame-to-frame jitter.
+
+    Tracks boxes across frames and stabilizes coordinates while preserving text and
+    adding `track_id` to stabilized boxes.
+    """
+    updated = _clone_frame_data(frame_data)
+    frame_indices = sorted([k for k in updated.keys() if isinstance(k, int)])
+
+    # Preserve all frames (including empty ones).
+    stabilized_by_frame = {frame_idx: [] for frame_idx in frame_indices}
+    tracks = []  # list of [(frame_idx, box_dict), ...]
+
+    # Build tracks greedily across frames.
+    for frame_idx in frame_indices:
+        current_boxes = [b.copy() for b in updated.get(frame_idx, {}).get("word_boxes", [])]
+        unmatched = list(enumerate(current_boxes))
+        if not unmatched:
+            continue
+
+        for track in tracks:
+            if not track:
+                continue
+            last_frame, last_box = track[-1]
+            if frame_idx - last_frame > max_gap:
+                continue
+
+            best_j = None
+            best_score = None
+            for j, box in unmatched:
+                if not _can_track_temporally(
+                    last_box,
+                    box,
+                    position_threshold=position_threshold,
+                    size_threshold=size_threshold,
+                    iou_threshold=iou_threshold,
+                ):
+                    continue
+                iou = _bbox_iou(last_box.get("bbox"), box.get("bbox"))
+                text_bonus = 1.0 if str(last_box.get("text", "")).strip() == str(box.get("text", "")).strip() else 0.0
+                score = (2.0 * iou) + text_bonus
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_j = j
+
+            if best_j is not None:
+                picked = None
+                new_unmatched = []
+                for j, box in unmatched:
+                    if j == best_j and picked is None:
+                        picked = box
+                    else:
+                        new_unmatched.append((j, box))
+                track.append((frame_idx, picked))
+                unmatched = new_unmatched
+
+        for _, box in unmatched:
+            tracks.append([(frame_idx, box)])
+
+    # Apply stabilization track by track.
+    for track_id, track in enumerate(tracks):
+        if not track:
+            continue
+
+        # Use the highest-confidence text for consistency.
+        best_text = max(
+            ((str(b.get("text", "")), float(b.get("confidence", 0.0))) for _, b in track),
+            key=lambda x: x[1],
+        )[0]
+
+        prev_stable_bbox = None
+        for frame_idx, box in track:
+            b = box.copy()
+            if prev_stable_bbox is None:
+                stable_bbox = _bbox_to_int_tuple(b.get("bbox"))
+            else:
+                stable_bbox = _stabilize_bbox(b.get("bbox"), prev_stable_bbox, movement_threshold=movement_threshold)
+
+            b["bbox"] = stable_bbox
+            b["text"] = best_text
+            b["track_id"] = track_id
+            stabilized_by_frame[frame_idx].append(b)
+            prev_stable_bbox = stable_bbox
+
+    # Write stabilized boxes back, keeping reading order inside each frame.
+    for frame_idx in frame_indices:
+        stable_boxes = stabilized_by_frame.get(frame_idx, [])
+        stable_boxes.sort(
+            key=lambda b: ((b["bbox"][1] + b["bbox"][3]) / 2.0, b["bbox"][0]) if b.get("bbox") else (10**9, 10**9)
+        )
+        updated[frame_idx]["word_boxes"] = stable_boxes
+
+    return updated
+
+
 def _sorted_frame_paths(frames_dir):
     frame_paths = [p for p in Path(frames_dir).iterdir() if p.suffix.lower() in {".jpg", ".png"}]
     frame_paths.sort(key=lambda p: int("".join(filter(str.isdigit, p.stem)) or 0))
@@ -665,6 +901,7 @@ def process_video_paddleocr(
     ocr_version="PP-OCRv5",
     save_pickle=True,
     save_raw_pickle=True,
+    stabilize_word_boxes=True,
 ):
     """
     Minimal PaddleOCR pass:
@@ -697,6 +934,8 @@ def process_video_paddleocr(
     frame_data = apply_parent_box_normalization(frame_data)
     frame_data = apply_parent_height_clustering(frame_data, min_confidence=0.7)
     frame_data = apply_word_box_postprocessing(frame_data)
+    if stabilize_word_boxes:
+        frame_data = apply_word_box_stabilization(frame_data)
 
     if save_pickle:
         out_path = output_dir / "boxes_paddleocr_words.pkl"
