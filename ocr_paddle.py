@@ -1,11 +1,15 @@
 import json
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 import pickle
 import re
 import statistics
 import string
 import copy
+import unicodedata
 from pathlib import Path
+from difflib import SequenceMatcher
 
 import cv2
 from tqdm import tqdm
@@ -759,31 +763,28 @@ def apply_word_box_postprocessing(frame_data):
         frame["word_boxes"] = postprocess_word_boxes(word_boxes_with_synced_parents)
     return updated
 
-
-def apply_word_box_stabilization(
+def apply_box_stabilization(
     frame_data,
     max_gap=6,
-    position_threshold=50,
-    size_threshold=0.4,
+    position_threshold=60,
+    size_threshold=0.45,
     iou_threshold=0.1,
     movement_threshold=3,
 ):
     """
-    Temporal stabilization for final word boxes to reduce frame-to-frame jitter.
+    Temporal stabilization for parent boxes (recommended primary stabilization).
 
-    Tracks boxes across frames and stabilizes coordinates while preserving text and
-    adding `track_id` to stabilized boxes.
+    Tracks `parent_boxes` across frames and stabilizes coordinates while preserving
+    text and adding `track_id` to parent boxes.
     """
     updated = _clone_frame_data(frame_data)
     frame_indices = sorted([k for k in updated.keys() if isinstance(k, int)])
 
-    # Preserve all frames (including empty ones).
     stabilized_by_frame = {frame_idx: [] for frame_idx in frame_indices}
     tracks = []  # list of [(frame_idx, box_dict), ...]
 
-    # Build tracks greedily across frames.
     for frame_idx in frame_indices:
-        current_boxes = [b.copy() for b in updated.get(frame_idx, {}).get("word_boxes", [])]
+        current_boxes = [b.copy() for b in updated.get(frame_idx, {}).get("parent_boxes", [])]
         unmatched = list(enumerate(current_boxes))
         if not unmatched:
             continue
@@ -827,12 +828,10 @@ def apply_word_box_stabilization(
         for _, box in unmatched:
             tracks.append([(frame_idx, box)])
 
-    # Apply stabilization track by track.
     for track_id, track in enumerate(tracks):
         if not track:
             continue
 
-        # Use the highest-confidence text for consistency.
         best_text = max(
             ((str(b.get("text", "")), float(b.get("confidence", 0.0))) for _, b in track),
             key=lambda x: x[1],
@@ -852,13 +851,197 @@ def apply_word_box_stabilization(
             stabilized_by_frame[frame_idx].append(b)
             prev_stable_bbox = stable_bbox
 
-    # Write stabilized boxes back, keeping reading order inside each frame.
     for frame_idx in frame_indices:
         stable_boxes = stabilized_by_frame.get(frame_idx, [])
         stable_boxes.sort(
             key=lambda b: ((b["bbox"][1] + b["bbox"][3]) / 2.0, b["bbox"][0]) if b.get("bbox") else (10**9, 10**9)
         )
-        updated[frame_idx]["word_boxes"] = stable_boxes
+        updated[frame_idx]["parent_boxes"] = stable_boxes
+
+    return updated
+
+
+def filter_boxes_by_names(
+    frame_data,
+    names_dict,
+    similarity_threshold=0.8,
+    source_key="word_boxes",
+    output_key="word_boxes",
+):
+    """
+    Match word-level boxes against a names dictionary and add `to_show` flags.
+
+    Reads boxes from `frame[source_key]` (default: `word_boxes`) and writes results
+    to `frame[output_key]`. Matched name sequences are merged into one box with
+    `to_show=True`; unmatched boxes are kept with `to_show=False`.
+    """
+    updated = _clone_frame_data(frame_data)
+
+    if not names_dict:
+        for frame in updated.values():
+            out = []
+            for b in frame.get(source_key, []) or []:
+                b2 = b.copy()
+                b2["to_show"] = False
+                b2.setdefault("name", "")
+                b2.setdefault("alterego", "")
+                out.append(b2)
+            frame[output_key] = out
+        return updated
+
+    def normalize_text(text):
+        if not text:
+            return ""
+        text = unicodedata.normalize("NFD", str(text))
+        text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+        return text.lower().strip()
+
+    def word_matches_name_part(word_text, name_part):
+        norm_word = normalize_text(word_text)
+        norm_name = normalize_text(name_part)
+        if not norm_word or not norm_name:
+            return False, 0.0
+        if norm_word == norm_name:
+            return True, 1.0
+        similarity = SequenceMatcher(None, norm_word, norm_name).ratio()
+        return (similarity >= similarity_threshold), similarity
+
+    def group_boxes_into_lines(boxes):
+        if not boxes:
+            return []
+
+        indexed = [(i, b) for i, b in enumerate(boxes) if b.get("bbox")]
+        if not indexed:
+            return []
+
+        indexed.sort(key=lambda x: (((x[1]["bbox"][1] + x[1]["bbox"][3]) / 2.0), x[1]["bbox"][0]))
+        lines = [[indexed[0]]]
+
+        for idx, box in indexed[1:]:
+            prev_box = lines[-1][-1][1]
+            prev_cy = (prev_box["bbox"][1] + prev_box["bbox"][3]) / 2.0
+            curr_cy = (box["bbox"][1] + box["bbox"][3]) / 2.0
+
+            prev_h = max(1, prev_box["bbox"][3] - prev_box["bbox"][1])
+            curr_h = max(1, box["bbox"][3] - box["bbox"][1])
+            line_tol = max(15, int(round(0.5 * min(prev_h, curr_h))))
+
+            if abs(curr_cy - prev_cy) <= line_tol:
+                lines[-1].append((idx, box))
+            else:
+                lines.append([(idx, box)])
+
+        for line in lines:
+            line.sort(key=lambda x: x[1]["bbox"][0])
+        return lines
+
+    def find_name_sequences(line_boxes):
+        matches = []
+
+        for name, alterego in names_dict.items():
+            name_words = normalize_text(name).split()
+            if not name_words:
+                continue
+
+            for start_idx in range(len(line_boxes)):
+                matched_boxes = []
+                confidence_scores = []
+                box_idx = start_idx
+                word_idx = 0
+
+                while word_idx < len(name_words) and box_idx < len(line_boxes):
+                    orig_idx, box = line_boxes[box_idx]
+                    box_text = str(box.get("text", "")).strip()
+
+                    if not box_text:
+                        box_idx += 1
+                        continue
+
+                    is_match, conf = word_matches_name_part(box_text, name_words[word_idx])
+                    if not is_match:
+                        break
+
+                    matched_boxes.append((orig_idx, box))
+                    confidence_scores.append(conf)
+                    word_idx += 1
+                    box_idx += 1
+
+                if word_idx == len(name_words):
+                    avg_conf = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
+                    matches.append({
+                        "name": name,
+                        "alterego": alterego,
+                        "boxes": matched_boxes,
+                        "confidence": avg_conf,
+                    })
+
+        if not matches:
+            return []
+
+        matches.sort(key=lambda x: (len(x["boxes"]), x["confidence"]), reverse=True)
+        final_matches = []
+        used_indices = set()
+        for match in matches:
+            box_indices = {idx for idx, _ in match["boxes"]}
+            if box_indices.intersection(used_indices):
+                continue
+            final_matches.append(match)
+            used_indices.update(box_indices)
+        return final_matches
+
+    def merge_matched_boxes(match):
+        boxes = [box for _, box in match["boxes"]]
+        x1 = min(b["bbox"][0] for b in boxes)
+        y1 = min(b["bbox"][1] for b in boxes)
+        x2 = max(b["bbox"][2] for b in boxes)
+        y2 = max(b["bbox"][3] for b in boxes)
+
+        parent_box = boxes[0].get("parent_box", None)
+        parent_text = boxes[0].get("parent_text", None)
+        track_ids = [b.get("track_id") for b in boxes if b.get("track_id") is not None]
+
+        return {
+            "bbox": _bbox_to_int_tuple((x1, y1, x2, y2)),
+            "text": " ".join(str(b.get("text", "")) for b in boxes).strip(),
+            "name": match["name"],
+            "alterego": match["alterego"],
+            "confidence": float(match.get("confidence", 0.0)),
+            "to_show": True,
+            "parent_box": _bbox_to_int_tuple(parent_box) if parent_box is not None else None,
+            "parent_text": parent_text,
+            "track_id": track_ids[0] if track_ids else None,
+            "match_type": "word_level",
+        }
+
+    for frame in updated.values():
+        boxes = frame.get(source_key, []) or []
+        if not boxes:
+            frame[output_key] = []
+            continue
+
+        lines = group_boxes_into_lines(boxes)
+        frame_results = []
+        all_matched_indices = set()
+
+        for line in lines:
+            matches = find_name_sequences(line)
+            for match in matches:
+                frame_results.append(merge_matched_boxes(match))
+                all_matched_indices.update(idx for idx, _ in match["boxes"])
+
+        for i, box in enumerate(boxes):
+            if i in all_matched_indices:
+                continue
+            box_copy = box.copy()
+            box_copy["to_show"] = False
+            box_copy.setdefault("name", "")
+            box_copy.setdefault("alterego", "")
+            frame_results.append(box_copy)
+
+        frame_results.sort(
+            key=lambda b: (((b["bbox"][1] + b["bbox"][3]) / 2.0), b["bbox"][0]) if b.get("bbox") else (10**9, 10**9)
+        )
+        frame[output_key] = frame_results
 
     return updated
 
@@ -901,7 +1084,7 @@ def process_video_paddleocr(
     ocr_version="PP-OCRv5",
     save_pickle=True,
     save_raw_pickle=True,
-    stabilize_word_boxes=True,
+    stabilize_boxes=True,
 ):
     """
     Minimal PaddleOCR pass:
@@ -933,9 +1116,9 @@ def process_video_paddleocr(
 
     frame_data = apply_parent_box_normalization(frame_data)
     frame_data = apply_parent_height_clustering(frame_data, min_confidence=0.7)
+    if stabilize_boxes:
+        frame_data = apply_box_stabilization(frame_data)
     frame_data = apply_word_box_postprocessing(frame_data)
-    if stabilize_word_boxes:
-        frame_data = apply_word_box_stabilization(frame_data)
 
     if save_pickle:
         out_path = output_dir / "boxes_paddleocr_words.pkl"
