@@ -60,51 +60,6 @@ def get_easyocr_reader(languages):
     print("EasyOCR reader initialized.")
     return EASYOCR_READER
 
-def _resolve_paddle_language(languages):
-    """Resolve a PaddleOCR language code from a list of language hints."""
-    if not languages:
-        return "en"
-    if isinstance(languages, str):
-        return languages.lower()
-    normalized = [str(lang).lower().strip() for lang in languages if str(lang).strip()]
-    if not normalized:
-        return "en"
-    # PaddleOCR accepts a single language code. Prefer English if present.
-    if "en" in normalized:
-        return "en"
-    return normalized[0]
-
-def get_paddleocr_reader(languages):
-    """
-    Initialize PaddleOCR reader.
-    
-    Returns:
-        paddleocr.PaddleOCR: Initialized PaddleOCR reader instance
-    """
-    try:
-        from paddleocr import PaddleOCR
-    except Exception as e:
-        raise ImportError(
-            "PaddleOCR is not installed. Install it or choose ocr_engine='easyocr'."
-        ) from e
-
-    device, _ = 'cuda', 0 #select_device()
-    paddle_lang = _resolve_paddle_language(languages)
-    # PaddleOCR>=3 uses `device` (e.g., 'cpu', 'gpu:0').
-    paddle_device = "gpu:0" if device == "cuda" else "cpu"
-    print(f"Initializing PaddleOCR reader (lang={paddle_lang}, device={paddle_device})...")
-    # Disable Paddle's document preprocessor for chat/screen-recording frames.
-    # The doc orientation + unwarping stages can distort UI screenshots.
-    reader = PaddleOCR(
-        lang=paddle_lang,
-        device=paddle_device,
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=False,
-    )
-    print("PaddleOCR reader initialized.")
-    return reader
-
 def get_ocr_reader(languages, ocr_engine="easyocr"):
     """
     Initialize OCR reader for the requested backend.
@@ -112,8 +67,8 @@ def get_ocr_reader(languages, ocr_engine="easyocr"):
     engine = (ocr_engine or "easyocr").lower().strip()
     if engine == "easyocr":
         return get_easyocr_reader(languages)
-    if engine == "paddleocr":
-        return get_paddleocr_reader(languages)
+    # if engine == "paddleocr":
+    #     return get_paddleocr_reader(languages)
     raise ValueError(f"Unsupported ocr_engine: {ocr_engine}")
 
 def extract_text_with_easyocr(image: np.ndarray, reader: Any, min_confidence: float = 0.5) -> list:
@@ -172,164 +127,6 @@ def extract_text_with_easyocr(image: np.ndarray, reader: Any, min_confidence: fl
     
     return detections
 
-def _extract_detections_from_paddle_result(result, min_confidence: float, scale_factor: float) -> list:
-    """Normalize PaddleOCR output into TiT detection dicts."""
-    detections = []
-    if not result:
-        return detections
-    
-    def to_xyxy(bbox):
-        if bbox is None:
-            return None
-        if hasattr(bbox, "tolist"):
-            bbox = bbox.tolist()
-        if not isinstance(bbox, (list, tuple)):
-            return None
-        if len(bbox) == 4 and all(not isinstance(v, (list, tuple)) for v in bbox):
-            x1, y1, x2, y2 = bbox
-            return float(x1), float(y1), float(x2), float(y2)
-        if len(bbox) >= 4 and isinstance(bbox[0], (list, tuple)):
-            try:
-                x_coords = [float(point[0]) for point in bbox]
-                y_coords = [float(point[1]) for point in bbox]
-            except Exception:
-                return None
-            return min(x_coords), min(y_coords), max(x_coords), max(y_coords)
-        return None
-    
-    def append_detection(text, confidence, xyxy):
-        if not text:
-            return
-        try:
-            confidence = float(confidence)
-        except Exception:
-            confidence = 0.0
-        if confidence < min_confidence:
-            return
-        if xyxy is None:
-            return
-        
-        x_start, y_start, x_end, y_end = [int(round(v)) for v in xyxy]
-        if scale_factor != 1:
-            x_start = int(round(x_start / scale_factor))
-            y_start = int(round(y_start / scale_factor))
-            x_end = int(round(x_end / scale_factor))
-            y_end = int(round(y_end / scale_factor))
-        
-        detections.append({
-            'text': str(text).strip(),
-            'bbox': (x_start, y_start, x_end, y_end),
-            'confidence': confidence,
-            'original_bbox': (x_start, y_start, x_end, y_end)
-        })
-
-    # Paddle may return nested shapes depending on version/input type.
-    candidate_lines = result
-    if isinstance(candidate_lines, (list, tuple)) and len(candidate_lines) == 1 and isinstance(candidate_lines[0], (list, tuple)):
-        first = candidate_lines[0]
-        if first and isinstance(first[0], (list, tuple)):
-            candidate_lines = first
-
-    for item in candidate_lines:
-        # PaddleOCR>=3 returns OCRResult objects (or dicts) with a nested `res`.
-        item_dict = None
-        if isinstance(item, dict):
-            item_dict = item
-        elif hasattr(item, "res"):
-            try:
-                item_dict = {"res": getattr(item, "res")}
-            except Exception:
-                item_dict = None
-        elif hasattr(item, "json"):
-            try:
-                raw_json = getattr(item, "json")
-                if callable(raw_json):
-                    raw_json = raw_json()
-                if isinstance(raw_json, str):
-                    item_dict = json.loads(raw_json)
-                elif isinstance(raw_json, dict):
-                    item_dict = raw_json
-            except Exception:
-                item_dict = None
-        
-        if isinstance(item_dict, dict):
-            payload = item_dict.get("res", item_dict)
-            if isinstance(payload, dict):
-                texts = payload.get("rec_texts") or payload.get("texts") or []
-                scores = payload.get("rec_scores") or payload.get("scores") or []
-                polys = (
-                    payload.get("rec_polys")
-                    or payload.get("dt_polys")
-                    or payload.get("polys")
-                    or []
-                )
-                
-                if isinstance(texts, str):
-                    texts = [texts]
-                if not isinstance(texts, (list, tuple)):
-                    texts = []
-                if not isinstance(scores, (list, tuple)):
-                    scores = []
-                if not isinstance(polys, (list, tuple)):
-                    polys = []
-                
-                for idx, text in enumerate(texts):
-                    xyxy = to_xyxy(polys[idx]) if idx < len(polys) else None
-                    conf = scores[idx] if idx < len(scores) else 1.0
-                    append_detection(text, conf, xyxy)
-                continue
-        
-        # Legacy PaddleOCR format: [bbox, (text, confidence)]
-        if not isinstance(item, (list, tuple)) or len(item) < 2:
-            continue
-        bbox = item[0]
-        text_info = item[1]
-        if not isinstance(text_info, (list, tuple)) or len(text_info) < 2:
-            continue
-        xyxy = to_xyxy(bbox)
-        append_detection(text_info[0], text_info[1], xyxy)
-
-    return detections
-
-def _ensure_three_channel_uint8(image: np.ndarray) -> np.ndarray:
-    """
-    Ensure image is uint8 HxWx3 for PaddleOCR v3 pipelines.
-    """
-    if image is None:
-        return image
-
-    arr = np.asarray(image)
-    if arr.ndim == 2:
-        arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
-    elif arr.ndim == 3:
-        channels = arr.shape[2]
-        if channels == 1:
-            arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
-        elif channels == 4:
-            arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
-        elif channels != 3:
-            # Keep first 3 channels as a conservative fallback.
-            arr = arr[:, :, :3]
-    else:
-        raise ValueError(f"Unsupported image shape for OCR: {arr.shape}")
-
-    if arr.dtype != np.uint8:
-        arr = np.clip(arr, 0, 255).astype(np.uint8)
-
-    return np.ascontiguousarray(arr)
-
-def extract_text_with_paddleocr(image: np.ndarray, reader: Any, min_confidence: float = 0.5) -> list:
-    """
-    Extract text from an image using PaddleOCR.
-    """
-    # processed_image, scale_factor = preprocess_image_for_ocr(image)
-    processed_image = _ensure_three_channel_uint8(image)
-    if hasattr(reader, "predict"):
-        result = reader.predict(processed_image)
-    else:
-        result = reader.ocr(processed_image)
-    return _extract_detections_from_paddle_result(result, min_confidence, 1.0)
-
 def extract_text_with_backend(image: np.ndarray, reader: Any, ocr_engine="easyocr", min_confidence: float = 0.5) -> list:
     """
     Dispatch OCR extraction to selected backend.
@@ -337,8 +134,8 @@ def extract_text_with_backend(image: np.ndarray, reader: Any, ocr_engine="easyoc
     engine = (ocr_engine or "easyocr").lower().strip()
     if engine == "easyocr":
         return extract_text_with_easyocr(image, reader, min_confidence=min_confidence)
-    if engine == "paddleocr":
-        return extract_text_with_paddleocr(image, reader, min_confidence=min_confidence)
+    # if engine == "paddleocr":
+    #     return extract_text_with_paddleocr(image, reader, min_confidence=min_confidence)
     raise ValueError(f"Unsupported ocr_engine: {ocr_engine}")
 
 def preprocess_image_for_ocr(
@@ -485,116 +282,171 @@ def process_frames_parallel(frames_dir, languages, num_workers=-1, force_cpu=Fal
     """Alias for process_frames_sequential (parallel removed due to CUDA issues)."""
     return process_frames_sequential(frames_dir, languages, ocr_engine=ocr_engine)
 
-def merge_line_boxes(frame_boxes, x_threshold=20):
+def merge_line_boxes(
+    frame_boxes,
+    x_threshold=20,
+    height_rel_tol=0.20,
+    center_y_tol_factor=0.50,
+    min_vertical_overlap_ratio=0.50,
+    max_x_overlap_px=10,
+):
     """
-    Merge horizontally adjacent boxes that likely belong to the same text line segment.
-    Boxes are merged only when they are on the same line, have similar heights, and are within a horizontal gap threshold.
-    
-    Args:
-        frame_boxes (dict): Dictionary of frame indices to list of bounding boxes
-        x_threshold (int): Maximum horizontal distance between boxes to consider merging
-        
-    Returns:
-        dict: Updated frame_boxes with merged entries
+    Merge OCR boxes that belong to the same text line using geometry only.
+
+    This function does not filter by names/text content. It groups boxes by
+    line compatibility (height, vertical alignment, vertical overlap, and
+    horizontal proximity) and merges each compatible cluster left-to-right.
     """
     merged_frame_boxes = {}
 
-    def _height(b):
-        return float(b['bbox'][3] - b['bbox'][1])
+    def _bbox_metrics(box):
+        bbox = box.get("bbox")
+        if bbox is None:
+            return None
+        x1, y1, x2, y2 = _bbox_to_int_tuple(bbox)
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        h = max(1, y2 - y1)
+        cy = (y1 + y2) / 2.0
+        return {
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+            "h": h,
+            "cy": cy,
+        }
 
-    def _vertical_overlap_ratio(a, b):
-        ay1, ay2 = a['bbox'][1], a['bbox'][3]
-        by1, by2 = b['bbox'][1], b['bbox'][3]
-        overlap = max(0.0, min(ay2, by2) - max(ay1, by1))
-        min_h = max(1.0, min(_height(a), _height(b)))
-        return overlap / min_h
+    def _cluster_sort_key(box):
+        m = _bbox_metrics(box)
+        if m is None:
+            return (float("inf"), float("inf"))
+        return (m["cy"], m["x1"])
 
-    def _height_similarity_ok(a, b, max_rel_diff=0.20):
-        ha = max(1.0, _height(a))
-        hb = max(1.0, _height(b))
-        return abs(ha - hb) / max(ha, hb) <= max_rel_diff
+    def _left_to_right_key(box):
+        m = _bbox_metrics(box)
+        if m is None:
+            return (float("inf"), float("inf"))
+        return (m["x1"], m["cy"])
 
-    def _same_line_and_mergeable(a, b):
-        # Require strong vertical overlap and similar text height.
-        if _vertical_overlap_ratio(a, b) < 0.6:
+    def _compatible(a, b):
+        ma = _bbox_metrics(a)
+        mb = _bbox_metrics(b)
+        if ma is None or mb is None:
             return False
-        if not _height_similarity_ok(a, b):
+
+        rel_h_diff = abs(ma["h"] - mb["h"]) / float(max(ma["h"], mb["h"]))
+        if rel_h_diff > height_rel_tol:
             return False
 
-        # b should be to the right of a (allow slight overlap from OCR jitter).
-        gap = b['bbox'][0] - a['bbox'][2]
-        if gap < -10 or gap > x_threshold:
+        center_y_diff = abs(ma["cy"] - mb["cy"])
+        if center_y_diff > center_y_tol_factor * min(ma["h"], mb["h"]):
             return False
+
+        overlap_y = max(0, min(ma["y2"], mb["y2"]) - max(ma["y1"], mb["y1"]))
+        if overlap_y / float(min(ma["h"], mb["h"])) < min_vertical_overlap_ratio:
+            return False
+
+        # Require proximity on x (same idea as normalize_parent_boxes_by_line).
+        x_gap = max(0, max(ma["x1"], mb["x1"]) - min(ma["x2"], mb["x2"]))
+        if x_gap > x_threshold:
+            return False
+
+        # Allow slight overlap from OCR jitter, but reject heavy overlap (likely duplicate boxes).
+        overlap_x = max(0, min(ma["x2"], mb["x2"]) - max(ma["x1"], mb["x1"]))
+        if overlap_x > max_x_overlap_px:
+            return False
+
         return True
 
-    def _merge_two(a, b):
-        ax1, ay1, ax2, ay2 = _bbox_to_int_tuple(a['bbox'])
-        bx1, by1, bx2, by2 = _bbox_to_int_tuple(b['bbox'])
-        new_x1 = min(ax1, bx1)
-        new_y1 = min(ay1, by1)
-        new_x2 = max(ax2, bx2)
-        new_y2 = max(ay2, by2)
+    def _merge_cluster(cluster_boxes):
+        cluster_sorted = sorted(cluster_boxes, key=_left_to_right_key)
 
-        merged = a.copy()
-        merged['bbox'] = (new_x1, new_y1, new_x2, new_y2)
-        merged['text'] = ((a.get('text', '') or '').strip() + " " + (b.get('text', '') or '').strip()).strip()
-        merged['confidence'] = (float(a.get('confidence', 1.0)) + float(b.get('confidence', 1.0))) / 2.0
+        valid_bbox_entries = [b for b in cluster_sorted if b.get("bbox") is not None]
+        if not valid_bbox_entries:
+            return cluster_sorted[0].copy()
 
-        # Keep original_bbox as a union too, so downstream normalization sees a stable parent.
-        a_orig = a.get('original_bbox', a['bbox'])
-        b_orig = b.get('original_bbox', b['bbox'])
-        aox1, aoy1, aox2, aoy2 = _bbox_to_int_tuple(a_orig)
-        box1, boy1, box2, boy2 = _bbox_to_int_tuple(b_orig)
-        merged['original_bbox'] = (
-            min(aox1, box1),
-            min(aoy1, boy1),
-            max(aox2, box2),
-            max(aoy2, boy2),
-        )
+        x1 = min(_bbox_to_int_tuple(b["bbox"])[0] for b in valid_bbox_entries)
+        y1 = min(_bbox_to_int_tuple(b["bbox"])[1] for b in valid_bbox_entries)
+        x2 = max(_bbox_to_int_tuple(b["bbox"])[2] for b in valid_bbox_entries)
+        y2 = max(_bbox_to_int_tuple(b["bbox"])[3] for b in valid_bbox_entries)
+
+        orig_boxes = [b.get("original_bbox", b["bbox"]) for b in valid_bbox_entries]
+        ox1 = min(_bbox_to_int_tuple(bb)[0] for bb in orig_boxes)
+        oy1 = min(_bbox_to_int_tuple(bb)[1] for bb in orig_boxes)
+        ox2 = max(_bbox_to_int_tuple(bb)[2] for bb in orig_boxes)
+        oy2 = max(_bbox_to_int_tuple(bb)[3] for bb in orig_boxes)
+
+        text_parts = []
+        for b in cluster_sorted:
+            t = (b.get("text") or "").strip()
+            if t:
+                text_parts.append(t)
+
+        confidences = []
+        for b in cluster_sorted:
+            c = b.get("confidence", None)
+            if c is None:
+                continue
+            try:
+                confidences.append(float(c))
+            except (TypeError, ValueError):
+                continue
+
+        merged = cluster_sorted[0].copy()
+        merged["bbox"] = (int(x1), int(y1), int(x2), int(y2))
+        merged["original_bbox"] = (int(ox1), int(oy1), int(ox2), int(oy2))
+        if text_parts:
+            merged["text"] = " ".join(text_parts)
+        if confidences:
+            merged["confidence"] = sum(confidences) / float(len(confidences))
         return merged
 
     for frame_idx, boxes in frame_boxes.items():
         if not boxes:
             merged_frame_boxes[frame_idx] = []
             continue
-            
-        # Sort boxes by y (top to bottom) then x (left to right)
-        # Using center y for better line alignment handling
-        sorted_boxes = sorted(boxes, key=lambda b: ((b['bbox'][1] + b['bbox'][3])/2, b['bbox'][0]))
-        
-        merged_boxes = []
-        used_indices = set()
 
-        i = 0
-        while i < len(sorted_boxes):
-            if i in used_indices:
-                i += 1
+        boxes_copy = [b.copy() for b in boxes]
+        valid_indices = [i for i, b in enumerate(boxes_copy) if b.get("bbox") is not None]
+        invalid_indices = [i for i, b in enumerate(boxes_copy) if b.get("bbox") is None]
+
+        visited = set()
+        merged_boxes = []
+
+        sorted_valid = sorted(valid_indices, key=lambda i: _cluster_sort_key(boxes_copy[i]))
+
+        for start in sorted_valid:
+            if start in visited:
                 continue
 
-            current = sorted_boxes[i]
-            used_indices.add(i)
+            cluster = []
+            stack = [start]
+            visited.add(start)
 
-            # Greedy chain-merge to the right while boxes remain on the same line and
-            # have similar heights. This keeps words from the same phrase together
-            # without merging across different UI text sizes.
-            merged_any = True
-            while merged_any:
-                merged_any = False
-                for j in range(i + 1, min(i + 10, len(sorted_boxes))):
-                    if j in used_indices:
+            while stack:
+                cur = stack.pop()
+                cluster.append(cur)
+                for j in valid_indices:
+                    if j in visited:
                         continue
-                    candidate = sorted_boxes[j]
-                    if _same_line_and_mergeable(current, candidate):
-                        current = _merge_two(current, candidate)
-                        used_indices.add(j)
-                        merged_any = True
-                        break
+                    if _compatible(boxes_copy[cur], boxes_copy[j]):
+                        visited.add(j)
+                        stack.append(j)
 
-            merged_boxes.append(current)
-            i += 1
-            
+            if len(cluster) == 1:
+                merged_boxes.append(boxes_copy[cluster[0]])
+            else:
+                merged_boxes.append(_merge_cluster([boxes_copy[idx] for idx in cluster]))
+
+        for idx in invalid_indices:
+            merged_boxes.append(boxes_copy[idx])
+
+        merged_boxes.sort(key=_cluster_sort_key)
         merged_frame_boxes[frame_idx] = merged_boxes
-        
+
     return merged_frame_boxes
 
 def split_boxes_into_words(frame_boxes):
