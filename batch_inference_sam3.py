@@ -223,22 +223,142 @@ def rebuild_full_mask(mask_entry, img_shape):
     return full
 
 
-def _circle_params_from_mask(full_mask):
-    """Return (cx, cy, r) for a boolean mask, or None if empty."""
+def _mask_bbox_from_bool(mask_bool):
+    """Return tight XYXY bbox for a boolean mask, or None if empty."""
+    ys, xs = np.nonzero(mask_bool)
+    if ys.size == 0 or xs.size == 0:
+        return None
+    return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+
+
+def _circle_info_from_mask(full_mask, img_shape=None):
+    """
+    Estimate circle params and quality flags from a boolean mask.
+
+    Returns dict with:
+      - params: (cx, cy, r)
+      - bbox: tight bbox of the visible mask
+      - coverage: visible_area / full_circle_area
+      - bbox_aspect: min(w, h) / max(w, h)
+      - touches_frame_edge: whether visible mask touches video frame border
+      - is_partial: likely clipped/partial circle (e.g. semicircle at viewport edge)
+    """
     if full_mask is None:
         return None
+
     mask = np.asarray(full_mask).astype(bool)
     if mask.size == 0 or not mask.any():
         return None
-    ys, xs = np.nonzero(mask)
-    cx = float(xs.mean())
-    cy = float(ys.mean())
-    dx = xs - cx
-    dy = ys - cy
-    r = float(np.sqrt(dx * dx + dy * dy).max())
+
+    bbox = _mask_bbox_from_bool(mask)
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = bbox
+    bw = max(1, x2 - x1 + 1)
+    bh = max(1, y2 - y1 + 1)
+    bbox_aspect = float(min(bw, bh)) / float(max(bw, bh))
+
+    # Robust circle estimate: use the largest contour + min enclosing circle.
+    mask_u8 = mask.astype(np.uint8) * 255
+    contours_info = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
+
+    cx = cy = r = None
+    if contours:
+        cnt = max(contours, key=cv2.contourArea)
+        (cx_cv, cy_cv), r_cv = cv2.minEnclosingCircle(cnt)
+        cx = float(cx_cv)
+        cy = float(cy_cv)
+        r = float(r_cv)
+
+    # Fallback for degenerate contours.
+    if r is None or not np.isfinite(r) or r <= 0:
+        ys, xs = np.nonzero(mask)
+        cx = float(xs.mean())
+        cy = float(ys.mean())
+        dx = xs - cx
+        dy = ys - cy
+        r = float(np.sqrt(dx * dx + dy * dy).max())
+
     if not np.isfinite(r) or r <= 0:
         return None
-    return cx, cy, r
+
+    visible_area = float(mask.sum())
+    circle_area = float(math.pi * r * r)
+    coverage = visible_area / max(circle_area, 1.0)
+
+    touches_frame_edge = False
+    if img_shape is not None and len(img_shape) >= 2:
+        img_h, img_w = int(img_shape[0]), int(img_shape[1])
+        if img_h > 1 and img_w > 1:
+            # 1px tolerance to avoid off-by-one noise.
+            touches_frame_edge = (
+                x1 <= 1 or y1 <= 1 or x2 >= (img_w - 2) or y2 >= (img_h - 2)
+            )
+
+    # Partial/clipped profile pictures (e.g. semicircles at viewport boundaries) should
+    # not be replaced by a full circle mask because that hallucinates hidden pixels.
+    is_partial = (
+        coverage < 0.72
+        or bbox_aspect < 0.78
+        or (touches_frame_edge and coverage < 0.90)
+    )
+
+    return {
+        "params": (cx, cy, r),
+        "bbox": bbox,
+        "coverage": float(coverage),
+        "bbox_aspect": float(bbox_aspect),
+        "touches_frame_edge": bool(touches_frame_edge),
+        "is_partial": bool(is_partial),
+    }
+
+
+def _circle_params_from_mask(full_mask, img_shape=None):
+    """Backward-compatible wrapper returning only (cx, cy, r)."""
+    info = _circle_info_from_mask(full_mask, img_shape=img_shape)
+    if info is None:
+        return None
+    return info["params"]
+
+
+def _stabilize_circle_params(current_params, prev_params, movement_threshold=0.75, radius_rel_tol=0.12):
+    """
+    Stabilize circle center/radius using OCR-style directional stabilization.
+
+    - Small center jitter -> freeze center
+    - Predominantly horizontal motion -> preserve y
+    - Predominantly vertical motion -> preserve x
+    - Radius jitter -> keep previous radius unless change looks real
+    """
+    if current_params is None:
+        return prev_params
+    if prev_params is None:
+        return current_params
+
+    curr_cx, curr_cy, curr_r = [float(v) for v in current_params]
+    prev_cx, prev_cy, prev_r = [float(v) for v in prev_params]
+
+    dx = abs(curr_cx - prev_cx)
+    dy = abs(curr_cy - prev_cy)
+
+    if dx < movement_threshold and dy < movement_threshold:
+        stable_cx, stable_cy = prev_cx, prev_cy
+    elif dy < movement_threshold or dy < dx / 2.0:
+        stable_cx, stable_cy = curr_cx, prev_cy
+    elif dx < movement_threshold or dx < dy / 2.0:
+        stable_cx, stable_cy = prev_cx, curr_cy
+    else:
+        stable_cx, stable_cy = curr_cx, curr_cy
+
+    if prev_r <= 0:
+        stable_r = curr_r
+    else:
+        rel_diff = abs(curr_r - prev_r) / max(prev_r, 1.0)
+        # Radius for a profile image should be very stable within one track.
+        stable_r = prev_r if rel_diff > radius_rel_tol else curr_r
+
+    return (float(stable_cx), float(stable_cy), float(stable_r))
 
 
 def _circle_crop_from_params(cx, cy, r, img_shape):
@@ -311,12 +431,16 @@ def circularize_results(
     tracks=None,
     smooth_alpha=0.35,
     radius_normalization=True,
-    max_radius_clusters=3,
+    max_radius_clusters=2,
     radius_merge_threshold=0.2,
-):
+    circle_padding_px=2.0,
+    ):
     """
     Create circular masks around each SAM3 mask and return a new results list.
-    If tracks are provided, centers/radii are smoothed across frames to reduce jitter.
+    If tracks are provided, centers/radii are stabilized across frames to reduce jitter.
+    Clipped/partial masks (e.g. semicircles at window boundaries) keep the original
+    SAM3 mask to avoid hallucinating a full circle outside the visible region.
+    Circularized masks are padded slightly to avoid visible edge bleed.
     """
     circular_results = []
 
@@ -340,37 +464,8 @@ def circularize_results(
                 img_w = img_h = 1
         frame_shapes[list_idx] = (img_h, img_w)
 
-    # Build smoothed circle params by track
-    smoothed_params = {}
-    if tracks:
-        for track in tracks:
-            prev = None
-            for list_idx, mask_idx in track:
-                if list_idx < 0 or list_idx >= len(all_results):
-                    continue
-                frame_results = all_results[list_idx][1]
-                if not frame_results or 'masks' not in frame_results:
-                    continue
-                masks = frame_results.get('masks', [])
-                if mask_idx < 0 or mask_idx >= len(masks):
-                    continue
-                img_shape = frame_shapes.get(list_idx, (1, 1))
-                mask_entry = masks[mask_idx]
-                full_mask = rebuild_full_mask(mask_entry, img_shape)
-                params = _circle_params_from_mask(full_mask)
-                if params is None:
-                    continue
-                if prev is None or smooth_alpha is None:
-                    smooth = params
-                else:
-                    cx = smooth_alpha * params[0] + (1 - smooth_alpha) * prev[0]
-                    cy = smooth_alpha * params[1] + (1 - smooth_alpha) * prev[1]
-                    r = smooth_alpha * params[2] + (1 - smooth_alpha) * prev[2]
-                    smooth = (cx, cy, r)
-                prev = smooth
-                smoothed_params[(list_idx, mask_idx)] = smooth
-
-    # First pass: compute params per mask
+    # First pass: compute raw circle info/params per mask
+    mask_info_cache = {}
     params_cache = {}
     for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):
         if not frame_results or 'masks' not in frame_results:
@@ -383,38 +478,102 @@ def circularize_results(
         img_shape = frame_shapes.get(list_idx, (1, 1))
 
         for i, mask_entry in enumerate(masks):
-            params = smoothed_params.get((list_idx, i))
-            if params is None:
-                full_mask = rebuild_full_mask(mask_entry, img_shape)
-                params = _circle_params_from_mask(full_mask)
-            params_cache[(list_idx, i)] = params
+            full_mask = rebuild_full_mask(mask_entry, img_shape)
+            info = _circle_info_from_mask(full_mask, img_shape=img_shape)
+            mask_info_cache[(list_idx, i)] = info
+            params_cache[(list_idx, i)] = None if info is None else info["params"]
 
-    # Second pass: optional radius normalization per frame
-    normalized_params = {}
+    # Build track lookup for consistent per-track stabilization.
+    track_id_by_key = {}
+    if tracks:
+        for track_id, track in enumerate(tracks):
+            for pair in track:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    continue
+                track_id_by_key[(int(pair[0]), int(pair[1]))] = int(track_id)
+
+    # Radius normalization should be global/track-consistent, not per-frame, otherwise
+    # the same profile picture can flicker between radius clusters frame-to-frame.
+    global_radius_centers = []
     if radius_normalization:
-        for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):
-            if not frame_results or 'masks' not in frame_results:
-                continue
-            masks = frame_results.get('masks', [])
-            radii = []
-            for i in range(len(masks)):
-                params = params_cache.get((list_idx, i))
-                if params is not None:
-                    radii.append(params[2])
+        good_radii = [
+            info["params"][2]
+            for info in mask_info_cache.values()
+            if info is not None and info.get("params") is not None and not info.get("is_partial", False)
+        ]
+        if not good_radii:
+            good_radii = [
+                info["params"][2]
+                for info in mask_info_cache.values()
+                if info is not None and info.get("params") is not None
+            ]
+        if good_radii:
+            k = min(max_radius_clusters, len(good_radii))
+            global_radius_centers = _kmeans_1d(good_radii, k=k, max_iter=20)
+            global_radius_centers = _merge_close_centers(
+                global_radius_centers, merge_threshold=radius_merge_threshold
+            )
+
+    def _snap_radius(r):
+        if not global_radius_centers:
+            return float(r)
+        return float(min(global_radius_centers, key=lambda c: abs(c - r)))
+
+    # Compute a stable target radius per track (prefer non-partial frames).
+    track_target_radius = {}
+    if tracks:
+        for track_id, track in enumerate(tracks):
+            radii_good = []
+            radii_all = []
+            for list_idx, mask_idx in track:
+                info = mask_info_cache.get((list_idx, mask_idx))
+                if info is None or info.get("params") is None:
+                    continue
+                r = float(info["params"][2])
+                radii_all.append(r)
+                if not info.get("is_partial", False):
+                    radii_good.append(r)
+            radii = radii_good if radii_good else radii_all
             if not radii:
                 continue
-            k = min(max_radius_clusters, len(radii))
-            centers = _kmeans_1d(radii, k=k, max_iter=20)
-            centers = _merge_close_centers(centers, merge_threshold=radius_merge_threshold)
-            if not centers:
-                continue
-            for i in range(len(masks)):
-                params = params_cache.get((list_idx, i))
-                if params is None:
+            target_r = float(np.median(np.asarray(radii, dtype=np.float32)))
+            if radius_normalization:
+                target_r = _snap_radius(target_r)
+            track_target_radius[track_id] = float(target_r)
+
+    # Stabilize center/radius track-wise (OCR-style directional stabilization).
+    stabilized_params = {}
+    if tracks:
+        for track_id, track in enumerate(tracks):
+            prev = None
+            target_r = track_target_radius.get(track_id)
+            for list_idx, mask_idx in sorted(track, key=lambda p: (p[0], p[1])):
+                info = mask_info_cache.get((list_idx, mask_idx))
+                if info is None or info.get("params") is None:
                     continue
-                r = params[2]
-                nearest = min(centers, key=lambda c: abs(c - r))
-                normalized_params[(list_idx, i)] = (params[0], params[1], float(nearest))
+                raw_cx, raw_cy, raw_r = info["params"]
+                candidate_r = float(target_r if target_r is not None else raw_r)
+                candidate = (float(raw_cx), float(raw_cy), candidate_r)
+
+                stable = _stabilize_circle_params(candidate, prev)
+
+                # Optional damping to reduce tiny jitter only.
+                # Do not low-pass real motion, otherwise masks visually "lag" behind
+                # moving profile pictures.
+                if prev is not None and smooth_alpha is not None:
+                    center_move = float(math.hypot(stable[0] - prev[0], stable[1] - prev[1]))
+                    # Only smooth sub-pixel / tiny center changes. For real movement,
+                    # keep the current stabilized center to avoid delay.
+                    if (not info.get("is_partial", False)) and center_move < 1.0:
+                        alpha = float(max(0.0, min(1.0, smooth_alpha)))
+                        stable = (
+                            alpha * stable[0] + (1.0 - alpha) * prev[0],
+                            alpha * stable[1] + (1.0 - alpha) * prev[1],
+                            alpha * stable[2] + (1.0 - alpha) * prev[2],
+                        )
+
+                prev = stable
+                stabilized_params[(list_idx, mask_idx)] = stable
 
     # Final pass: build circular results
     for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):
@@ -434,34 +593,45 @@ def circularize_results(
         new_scores = []
         new_labels = []
 
-        for i, mask_entry in enumerate(masks):
-            params = normalized_params.get((list_idx, i)) if radius_normalization else None
-            if params is None:
-                params = params_cache.get((list_idx, i))
+        def _append_original(mask_idx, mask_entry):
+            if mask_idx >= len(boxes):
+                return
+            box = boxes[mask_idx]
+            x1, y1, x2, y2 = [int(round(v)) for v in box]
+            score = scores[mask_idx] if mask_idx < len(scores) else 0.0
+            label = labels[mask_idx] if mask_idx < len(labels) else 1
+            new_boxes.append(np.array([x1, y1, x2, y2], dtype=np.float32))
+            new_masks.append(mask_entry)
+            new_scores.append(float(score))
+            new_labels.append(int(label))
 
+        for i, mask_entry in enumerate(masks):
+            key = (list_idx, i)
+            info = mask_info_cache.get(key)
+            params = stabilized_params.get(key)
             if params is None:
-                if i < len(boxes):
-                    box = boxes[i]
-                    x1, y1, x2, y2 = [int(round(v)) for v in box]
-                    score = scores[i] if i < len(scores) else 0.0
-                    label = labels[i] if i < len(labels) else 1
-                    new_boxes.append(np.array([x1, y1, x2, y2], dtype=np.float32))
-                    new_masks.append(mask_entry)
-                    new_scores.append(float(score))
-                    new_labels.append(int(label))
+                params = params_cache.get(key)
+                if params is not None and radius_normalization:
+                    track_id = track_id_by_key.get(key)
+                    if track_id in track_target_radius:
+                        target_r = track_target_radius[track_id]
+                    else:
+                        target_r = _snap_radius(params[2])
+                    params = (float(params[0]), float(params[1]), float(target_r))
+
+            # Keep the original SAM3 mask for clipped/partial profile pictures.
+            if info is not None and info.get("is_partial", False):
+                _append_original(i, mask_entry)
                 continue
 
-            crop, bbox = _circle_crop_from_params(params[0], params[1], params[2], img_shape)
+            if params is None:
+                _append_original(i, mask_entry)
+                continue
+
+            padded_r = float(params[2]) + max(0.0, float(circle_padding_px))
+            crop, bbox = _circle_crop_from_params(params[0], params[1], padded_r, img_shape)
             if crop is None or bbox is None:
-                if i < len(boxes):
-                    box = boxes[i]
-                    x1, y1, x2, y2 = [int(round(v)) for v in box]
-                    score = scores[i] if i < len(scores) else 0.0
-                    label = labels[i] if i < len(labels) else 1
-                    new_boxes.append(np.array([x1, y1, x2, y2], dtype=np.float32))
-                    new_masks.append(mask_entry)
-                    new_scores.append(float(score))
-                    new_labels.append(int(label))
+                _append_original(i, mask_entry)
                 continue
 
             pack_output = isinstance(mask_entry, dict) and "packed" in mask_entry
