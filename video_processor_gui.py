@@ -106,17 +106,11 @@ class VideoProcessorGUI:
         ttk.Entry(params_frame, textvariable=self.ocr_langs_var, width=20).grid(
             row=0, column=3, sticky=tk.W, padx=(10, 0), pady=2)
 
-        # OCR backend
+        # OCR backend (fixed to EasyOCR)
         ttk.Label(params_frame, text="OCR Engine:").grid(row=1, column=2, sticky=tk.W, pady=2)
-        self.ocr_engine_var = tk.StringVar(value="easyocr")
-        ocr_engine_combo = ttk.Combobox(
-            params_frame,
-            textvariable=self.ocr_engine_var,
-            values=["easyocr", "paddleocr"],
-            state="readonly",
-            width=16
+        ttk.Label(params_frame, text="EasyOCR").grid(
+            row=1, column=3, sticky=tk.W, padx=(10, 0), pady=2
         )
-        ocr_engine_combo.grid(row=1, column=3, sticky=tk.W, padx=(10, 0), pady=2)
         
         # SAM3 device
         ttk.Label(params_frame, text="SAM3 Device:").grid(row=1, column=0, sticky=tk.W, pady=2)
@@ -284,7 +278,7 @@ class VideoProcessorGUI:
             return
         
         ocr_languages = self.ocr_langs_var.get().split()
-        ocr_engine = self.ocr_engine_var.get()
+        ocr_engine = "easyocr"
         sam3_prompt = self.sam3_prompt_var.get()
         sam3_device = self.sam3_device_var.get()
         
