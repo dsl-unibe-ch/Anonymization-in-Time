@@ -48,6 +48,7 @@ def setup_predictor(device="auto", model_path="sam3.pt", conf=0.25, half=True):
         mode="predict",
         model=model_path,
         device=device_str,
+        imgsz=644,  # 644 is divisible by SAM3 stride (14); avoids per-frame auto-adjust warnings
         half=half and device in ["cuda", "mps"],  # Use FP16 for faster inference
         save=False,  # Don't auto-save, we'll handle that
         verbose=False,
@@ -881,6 +882,30 @@ def save_images_with_masks(img, results, output_path, mode='color', alpha=0.5, b
     return True
 
 
+def _cleanup_sam3_intermediate_pickles(output_folder):
+    """
+    Remove transient SAM3 cache files after final outputs are generated.
+
+    Kept outputs:
+    - detected_masks.pkl (raw SAM3 detections)
+    - sam3.pkl (postprocessed SAM3 masks, unified format)
+    - sam3_circular.pkl (circularized masks, unified format)
+    """
+    output_folder = Path(output_folder)
+    removable = [
+        output_folder / "detected_masks_propagated.pkl",
+        output_folder / "mask_tracks.pkl",
+        output_folder / "detected_masks_circular.pkl",
+    ]
+    for path in removable:
+        try:
+            if path.exists():
+                path.unlink()
+                print(f"Removed intermediate file: {path.name}")
+        except Exception as e:
+            print(f"Warning: Could not remove intermediate file {path}: {e}")
+
+
 def convert_results_to_unified_dict(all_results, tracks=None):
     """
     Convert SAM3 results list to unified per-frame dict format for compatibility
@@ -1118,6 +1143,9 @@ def process_video_sam3(frames_folder, output_folder,
             )
             if not saved:
                 img.save(output_path)
+
+    # Keep the output folder compact: raw + final SAM3 artifacts only.
+    _cleanup_sam3_intermediate_pickles(output_folder)
     
     print(f"SAM3 (Ultralytics) processing complete for {frames_folder.parent.name}")
     

@@ -125,8 +125,12 @@ def process_single_video(video_path, output_base_dir, dict_path,
         'video_name': video_name,
         'output_dir': str(video_output_dir),
         'frames_dir': None,
+        'ocr_raw_boxes_pkl': None,
         'ocr_pkl': None,
+        'ocr_text_timeline': None,
+        'sam3_raw_masks_pkl': None,
         'sam3_pkl': None,
+        'sam3_circular_pkl': None,
         'transitions_txt': None
     }
     
@@ -166,6 +170,13 @@ def process_single_video(video_path, output_base_dir, dict_path,
                 frame_step=frame_step,
                 ocr_engine=ocr_engine
             )
+            raw_ocr_boxes = video_output_dir / f"boxes_{ocr_engine}.pkl"
+            if raw_ocr_boxes.exists():
+                results['ocr_raw_boxes_pkl'] = str(raw_ocr_boxes)
+            elif ocr_engine == "easyocr":
+                legacy_ocr_boxes = video_output_dir / "boxes.pkl"
+                if legacy_ocr_boxes.exists():
+                    results['ocr_raw_boxes_pkl'] = str(legacy_ocr_boxes)
             ocr_pkl = video_output_dir / "ocr.pkl"
             results['ocr_pkl'] = str(ocr_pkl)
             # Export collapsed text timeline right after OCR
@@ -205,8 +216,14 @@ def process_single_video(video_path, output_base_dir, dict_path,
                 max_gap=5,
                 save_images=False
             )
+            sam3_raw_masks = video_output_dir / "detected_masks.pkl"
+            if sam3_raw_masks.exists():
+                results['sam3_raw_masks_pkl'] = str(sam3_raw_masks)
             sam3_pkl = video_output_dir / "sam3.pkl"
             results['sam3_pkl'] = str(sam3_pkl)
+            sam3_circular_pkl = video_output_dir / "sam3_circular.pkl"
+            if sam3_circular_pkl.exists():
+                results['sam3_circular_pkl'] = str(sam3_circular_pkl)
             print(f"✓ SAM3 processing complete: {sam3_pkl}")
         except Exception as e:
             print(f"✗ Error in SAM3 processing: {str(e)}")
