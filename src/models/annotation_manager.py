@@ -117,8 +117,12 @@ class AnnotationManager:
         target_ann['to_show'] = new_state
         self.modified = True
         
-        # Propagate to all annotations with same track_id (if available)
+        # Propagate to all annotations with same track_id AND same source
+        # (OCR and SAM3 both use sequential track_ids starting from 0, so
+        # we must also compare source to avoid cross-contamination)
         track_id = target_ann.get('track_id')
+        source = target_ann.get('source', '')
+        
         if track_id is not None:
             propagated_count = 0
             for frame_idx_iter, frame_annotations in self.frames.items():
@@ -126,15 +130,52 @@ class AnnotationManager:
                     # Skip the original annotation
                     if ann.get('id') == annotation_id:
                         continue
-                    # Toggle if same track_id
-                    if ann.get('track_id') == track_id:
+                    # Toggle if same track_id AND same source
+                    if ann.get('track_id') == track_id and ann.get('source', '') == source:
                         ann['to_show'] = new_state
                         propagated_count += 1
             
             if propagated_count > 0:
-                print(f"Toggled {propagated_count + 1} annotations across frames (track_id={track_id})")
+                print(f"Toggled {propagated_count + 1} annotations across frames (track_id={track_id}, source={source})")
+        elif source == 'sam3':
+            # Fallback for SAM3 masks without track_ids:
+            # propagate by bbox proximity (same circular mask position across frames)
+            propagated_count = self._propagate_sam3_by_bbox(target_ann, annotation_id, new_state)
+            if propagated_count > 0:
+                print(f"Toggled {propagated_count + 1} SAM3 annotations across frames (bbox fallback)")
         
         return new_state
+    
+    def _propagate_sam3_by_bbox(self, target_ann: dict, skip_id: int, new_state: bool, threshold: int = 40) -> int:
+        """
+        Fallback propagation for SAM3 masks that lack a track_id.
+        Matches across frames by bbox center proximity (profile images
+        stay in roughly the same position).
+        """
+        t_bbox = target_ann.get('bbox')
+        if not t_bbox:
+            return 0
+        
+        tx = (t_bbox[0] + t_bbox[2]) / 2
+        ty = (t_bbox[1] + t_bbox[3]) / 2
+        
+        propagated_count = 0
+        for _frame_idx, frame_annotations in self.frames.items():
+            for ann in frame_annotations:
+                if ann.get('id') == skip_id:
+                    continue
+                if ann.get('source') != 'sam3':
+                    continue
+                a_bbox = ann.get('bbox')
+                if not a_bbox:
+                    continue
+                ax = (a_bbox[0] + a_bbox[2]) / 2
+                ay = (a_bbox[1] + a_bbox[3]) / 2
+                if abs(ax - tx) < threshold and abs(ay - ty) < threshold:
+                    ann['to_show'] = new_state
+                    propagated_count += 1
+        
+        return propagated_count
     
     def toggle_parent_box(self, annotation_id: int, frame_idx: int) -> bool:
         """

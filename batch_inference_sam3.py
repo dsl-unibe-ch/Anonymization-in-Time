@@ -1301,10 +1301,14 @@ def process_video_sam3(frames_folder, output_folder,
             tracks = match_masks_across_frames(all_results)
             print(f"Regenerated {len(tracks)} mask tracks after overlap merge")
     except FileNotFoundError:
-        if masks_propagation and len(all_results) > 1:
-            print(f"\nApplying temporal mask propagation...")
+        # Always compute tracks — they are needed for toggle-propagation
+        # in the annotation viewer even when mask propagation is disabled.
+        if len(all_results) > 1:
             tracks = match_masks_across_frames(all_results)
             print(f"Found {len(tracks)} mask tracks across {len(all_results)} frames")
+        
+        if masks_propagation and tracks and len(all_results) > 1:
+            print(f"\nApplying temporal mask propagation...")
             filled_count = propagate_missing_masks(all_results, tracks, max_gap)
             print(f"Filled {filled_count} missing mask(s)")
         

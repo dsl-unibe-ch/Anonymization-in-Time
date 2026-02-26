@@ -817,11 +817,19 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
         return lines
     
     def find_name_sequences(line_boxes, names_dict):
-        """Find sequences of adjacent word boxes that match names"""
+        """
+        Find sequences of adjacent word boxes that match names.
+        
+        Supports partial matching: in group chats, only the first name may appear
+        even though the dictionary has the full name (e.g., "Flavia" matching
+        "Flavia Fabiel"). When a partial match is found, the alterego is
+        truncated to the corresponding number of words.
+        """
         matches = []
         
         for name, alterego in names_dict.items():
             name_words = normalize_text(name).split()
+            alterego_words = alterego.split() if alterego else []
             
             # Try to find this name in the line
             for start_idx in range(len(line_boxes)):
@@ -850,21 +858,47 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
                         # No match - break this attempt
                         break
                 
-                # Check if we matched all words in the name
+                if not matched_boxes:
+                    continue
+                
+                avg_confidence = sum(confidence_scores) / len(confidence_scores)
+                
+                # Full match: all words of the name were found
                 if word_idx == len(name_words):
-                    avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0
                     matches.append({
                         'name': name,
                         'alterego': alterego,
                         'boxes': matched_boxes,
-                        'confidence': avg_confidence
+                        'confidence': avg_confidence,
+                        'full_match': True,
+                    })
+                # Partial match: first N words of a multi-word name matched
+                # (only for names with 2+ words where at least the first word matched)
+                elif word_idx >= 1 and len(name_words) > 1:
+                    # Build truncated alterego with matching number of words
+                    if alterego_words:
+                        partial_alterego = ' '.join(alterego_words[:word_idx])
+                    else:
+                        partial_alterego = alterego
+                    
+                    # Slightly penalise partial matches so full matches win ties
+                    matches.append({
+                        'name': name,
+                        'alterego': partial_alterego,
+                        'boxes': matched_boxes,
+                        'confidence': avg_confidence * 0.95,
+                        'full_match': False,
                     })
         
-        # Remove overlapping matches, keep higher confidence ones
+        # Remove overlapping matches
+        # Priority: full > partial, then longer > shorter, then higher confidence
         if not matches:
             return []
         
-        matches.sort(key=lambda x: (len(x['boxes']), x['confidence']), reverse=True)
+        matches.sort(
+            key=lambda x: (x.get('full_match', False), len(x['boxes']), x['confidence']),
+            reverse=True,
+        )
         
         final_matches = []
         used_indices = set()
