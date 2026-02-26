@@ -127,12 +127,14 @@ def extract_video_frames(video_path, output_dir=None, frame_step=1, starting_sec
     # Check for existing frames in the output directory
     existing_frames = glob.glob(os.path.join(output_dir, "*.jpg"))
     if existing_frames:
-        if len(existing_frames) == expected_frame_count:
+        # Allow ±1 tolerance: OpenCV's CAP_PROP_FRAME_COUNT is often off by 1
+        # compared to what cap.read() actually delivers.
+        if abs(len(existing_frames) - expected_frame_count) <= 1:
             print(f"✔️  Found existing frames ({len(existing_frames)} frames). Skipping extraction.\n")
             cap.release()
             return output_dir
         else:
-            print(f"ℹ️  Existing frame count ({len(existing_frames)}) does not match expected ({expected_frame_count}). Clearing directory.")
+            print(f"ℹ️  Existing frame count ({len(existing_frames)}) does not match expected (~{expected_frame_count}). Clearing directory.")
             for frame_file in existing_frames:
                 os.remove(frame_file)
     
