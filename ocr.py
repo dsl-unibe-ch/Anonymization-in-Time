@@ -679,12 +679,16 @@ def split_boxes_into_words(frame_boxes):
             
             words = text.split()
             if len(words) <= 1:
-                # Single word or empty - keep as is
+                # Single word or empty - keep as is but assign unique
+                # word-level track_id so it doesn't collide with siblings
                 box_copy = box.copy()
                 if 'bbox' in box_copy:
                     box_copy['bbox'] = _bbox_to_int_tuple(box_copy['bbox'])
                 if box_copy.get('parent_box') is not None:
                     box_copy['parent_box'] = _bbox_to_int_tuple(box_copy['parent_box'])
+                parent_tid = box_copy.get('track_id')
+                if parent_tid is not None:
+                    box_copy['track_id'] = (parent_tid, 0)
                 split_boxes.append(box_copy)
                 continue
             
@@ -729,13 +733,19 @@ def split_boxes_into_words(frame_boxes):
                 word_x1 = int(max(x1, min(x2, word_x1)))
                 word_x2 = int(max(word_x1, min(x2, word_x2)))
                 
+                # Derive a unique word-level track_id from the parent
+                # line track_id + word index so that toggling one word
+                # does NOT propagate to sibling words in the same line.
+                parent_tid = box.get('track_id', None)
+                word_tid = (parent_tid, i) if parent_tid is not None else None
+                
                 word_boxes.append({
                     'bbox': (word_x1, y1, word_x2, y2),
                     'text': word,
                     'confidence': box.get('confidence', 1.0),
                     'parent_box': parent_bbox,
                     'parent_box_text': text,  # Save full parent text for matching
-                    'track_id': box.get('track_id', None)  # Preserve track_id from parent
+                    'track_id': word_tid,
                 })
                 
                 current_x = word_x2
@@ -1200,10 +1210,19 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
             track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id
             continue
         
-        # Multi-frame track - find best text representation
-        text_variants = [(box.get('text', ''), box.get('confidence', 0)) for _, box in track]
-        # Use the text with highest confidence
-        best_text = max(text_variants, key=lambda x: x[1])[0]
+        # Multi-frame track - find best text representation.
+        # Primary criterion: longest text (most characters).  Partial / corrupted
+        # OCR detections are shorter but can have *higher* confidence, so using
+        # confidence alone would propagate truncated text to every frame.
+        # Secondary: most words.  Tertiary: highest confidence.
+        text_variants = [
+            (box.get('text', ''), box.get('confidence', 0))
+            for _, box in track
+        ]
+        best_text = max(
+            text_variants,
+            key=lambda x: (len(x[0]), len(x[0].split()), x[1]),
+        )[0]
         
         # Multi-frame track - apply frame-to-frame stabilization
         for i, (frame_idx, box) in enumerate(track):

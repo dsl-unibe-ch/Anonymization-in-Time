@@ -379,10 +379,16 @@ class CanvasWidget(tk.Canvas):
             self.config(cursor='hand2' if hovered else 'arrow')
     
     def _on_mouse_click(self, event):
-        """Handle left mouse click for toggling annotations."""
+        """Handle left mouse click.
+        
+        Normal click  -> toggle single word box
+        Shift+click   -> toggle full parent line (same as right-click)
+        """
         if self.hovered_annotation and self.on_annotation_clicked:
             annotation_id = self.hovered_annotation.get('id')
-            self.on_annotation_clicked(annotation_id, self.current_frame_idx, is_right_click=False)
+            # Shift held → parent-box toggle (same as right-click)
+            is_shift = bool(event.state & 0x1)
+            self.on_annotation_clicked(annotation_id, self.current_frame_idx, is_right_click=is_shift)
     
     def _on_right_click(self, event):
         """Handle right mouse click for toggling parent boxes."""
