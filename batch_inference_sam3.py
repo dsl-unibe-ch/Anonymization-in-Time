@@ -670,6 +670,206 @@ def make_mask_entry(crop_bool, bbox, pack_bits=True):
     return crop_bool.astype(bool)
 
 
+def _infer_img_shape_from_frame_results(frame_results):
+    """Infer a minimal image shape (H, W) from frame boxes if image file is unavailable."""
+    if not frame_results or 'boxes' not in frame_results:
+        return (1, 1)
+    boxes = frame_results.get('boxes', [])
+    if not boxes:
+        return (1, 1)
+    max_x2 = max(int(round(b[2])) for b in boxes)
+    max_y2 = max(int(round(b[3])) for b in boxes)
+    return (max(1, max_y2 + 1), max(1, max_x2 + 1))
+
+
+def _boxes_intersect_xyxy(box_a, box_b):
+    """Return True if two XYXY boxes overlap with positive area."""
+    ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
+    bx1, by1, bx2, by2 = [float(v) for v in box_b]
+    inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+    return inter_w > 0.0 and inter_h > 0.0
+
+
+def merge_overlapping_masks_in_frame_results(frame_results, img_shape):
+    """
+    Merge overlapping masks within a single frame by OR-union.
+
+    This removes duplicate/stacked detections that would otherwise cause
+    double blur/color overlay in the same region.
+
+    Returns:
+        (new_frame_results, merged_count)
+    """
+    if not frame_results or 'masks' not in frame_results or 'boxes' not in frame_results:
+        return frame_results, 0
+
+    boxes = list(frame_results.get('boxes', []))
+    masks = list(frame_results.get('masks', []))
+    scores = list(frame_results.get('scores', []))
+    labels_present = frame_results.get('labels') is not None
+    labels = list(frame_results.get('labels', [])) if labels_present else []
+
+    n = min(len(boxes), len(masks))
+    if n <= 1:
+        return frame_results, 0
+
+    # Trim to aligned length to avoid index mismatches.
+    boxes = boxes[:n]
+    masks = masks[:n]
+    has_scores = len(scores) > 0
+    if has_scores:
+        scores = scores[:n]
+    if labels_present:
+        labels = labels[:n]
+
+    full_masks = []
+    for mask_entry in masks:
+        try:
+            full_masks.append(rebuild_full_mask(mask_entry, img_shape).astype(bool))
+        except Exception:
+            full_masks.append(None)
+
+    adjacency = {i: set() for i in range(n)}
+    for i in range(n):
+        if full_masks[i] is None:
+            continue
+        for j in range(i + 1, n):
+            if full_masks[j] is None:
+                continue
+            # BBox overlap is a cheap prefilter, then require actual mask overlap.
+            if not _boxes_intersect_xyxy(boxes[i], boxes[j]):
+                continue
+            if np.any(full_masks[i] & full_masks[j]):
+                adjacency[i].add(j)
+                adjacency[j].add(i)
+
+    visited = set()
+    clusters = []
+    for start in range(n):
+        if start in visited:
+            continue
+        stack = [start]
+        visited.add(start)
+        cluster = []
+        while stack:
+            cur = stack.pop()
+            cluster.append(cur)
+            for nxt in adjacency[cur]:
+                if nxt in visited:
+                    continue
+                visited.add(nxt)
+                stack.append(nxt)
+        clusters.append(sorted(cluster))
+
+    merged_count = sum(max(0, len(c) - 1) for c in clusters)
+    if merged_count == 0:
+        return frame_results, 0
+
+    # Preserve approximate visual order using the first original index in each cluster.
+    clusters.sort(key=lambda c: c[0])
+
+    new_boxes = []
+    new_masks = []
+    new_scores = []
+    new_labels = []
+
+    for cluster in clusters:
+        if len(cluster) == 1:
+            idx = cluster[0]
+            new_boxes.append(boxes[idx])
+            new_masks.append(masks[idx])
+            if has_scores and idx < len(scores):
+                new_scores.append(float(scores[idx]))
+            else:
+                new_scores.append(0.0)
+            if labels_present:
+                label_val = labels[idx] if idx < len(labels) else 1
+                new_labels.append(int(label_val))
+            continue
+
+        union_mask = np.zeros(img_shape[:2], dtype=bool)
+        pack_output = False
+        for idx in cluster:
+            if full_masks[idx] is not None:
+                union_mask |= full_masks[idx]
+            if isinstance(masks[idx], dict) and "packed" in masks[idx]:
+                pack_output = True
+
+        bbox = _mask_bbox_from_bool(union_mask)
+        if bbox is None:
+            # Fallback to union of source boxes if masks ended up empty.
+            x1 = min(int(round(boxes[idx][0])) for idx in cluster)
+            y1 = min(int(round(boxes[idx][1])) for idx in cluster)
+            x2 = max(int(round(boxes[idx][2])) for idx in cluster)
+            y2 = max(int(round(boxes[idx][3])) for idx in cluster)
+            bbox = [x1, y1, x2, y2]
+            crop = np.zeros((max(1, y2 - y1 + 1), max(1, x2 - x1 + 1)), dtype=bool)
+        else:
+            x1, y1, x2, y2 = bbox
+            crop = union_mask[y1:y2 + 1, x1:x2 + 1]
+
+        new_boxes.append(np.array(bbox, dtype=np.float32))
+        new_masks.append(make_mask_entry(crop, bbox, pack_bits=pack_output))
+
+        if has_scores:
+            score_candidates = [float(scores[idx]) for idx in cluster if idx < len(scores)]
+            new_scores.append(float(max(score_candidates)) if score_candidates else 0.0)
+        else:
+            new_scores.append(0.0)
+        if labels_present:
+            # Keep label of the highest-score member if scores exist, else first.
+            if has_scores:
+                best_idx = max(cluster, key=lambda idx: float(scores[idx]) if idx < len(scores) else -1.0)
+            else:
+                best_idx = cluster[0]
+            label_val = labels[best_idx] if best_idx < len(labels) else 1
+            new_labels.append(int(label_val))
+
+    new_frame_results = dict(frame_results)
+    new_frame_results['boxes'] = new_boxes
+    new_frame_results['masks'] = new_masks
+    new_frame_results['scores'] = new_scores
+    if labels_present:
+        new_frame_results['labels'] = new_labels
+
+    return new_frame_results, int(merged_count)
+
+
+def merge_overlapping_masks_in_results_list(all_results):
+    """
+    Merge overlapping masks for every frame in the SAM3 results list.
+
+    Returns:
+        (updated_results_list, total_merged_masks)
+    """
+    if not all_results:
+        return all_results, 0
+
+    total_merged = 0
+    updated = []
+
+    for frame_idx, frame_results, img_path in all_results:
+        if not frame_results or 'masks' not in frame_results:
+            updated.append((frame_idx, frame_results, img_path))
+            continue
+
+        img_shape = None
+        try:
+            with Image.open(img_path) as img:
+                img_shape = (int(img.height), int(img.width))
+        except Exception:
+            img_shape = _infer_img_shape_from_frame_results(frame_results)
+
+        merged_frame_results, merged_count = merge_overlapping_masks_in_frame_results(
+            frame_results, img_shape
+        )
+        total_merged += int(merged_count)
+        updated.append((frame_idx, merged_frame_results, img_path))
+
+    return updated, total_merged
+
+
 def calculate_iou(box1, box2):
     """Calculate IoU between two boxes in XYXY format"""
     x1 = max(box1[0], box2[0])
@@ -1068,6 +1268,11 @@ def process_video_sam3(frames_folder, output_folder,
         with open(pickle_path, 'wb') as f:
             pickle.dump(all_results, f)
         print(f"Saved {len(all_results)} frames with masks")
+
+    # Merge duplicate/overlapping detections before temporal postprocessing.
+    all_results, merged_overlap_count = merge_overlapping_masks_in_results_list(all_results)
+    if merged_overlap_count > 0:
+        print(f"Merged {merged_overlap_count} overlapping SAM3 mask(s) before postprocessing")
     
     pickle_path_propagated = output_folder / 'detected_masks_propagated.pkl'
     tracks = None
@@ -1075,6 +1280,11 @@ def process_video_sam3(frames_folder, output_folder,
         with open(pickle_path_propagated, 'rb') as f:
             all_results = pickle.load(f)
         print(f"Loaded existing propagated results from {pickle_path_propagated}, skipping propagation")
+
+        # If propagated cache was created before overlap-merge support, normalize it here.
+        all_results, merged_overlap_count = merge_overlapping_masks_in_results_list(all_results)
+        if merged_overlap_count > 0:
+            print(f"Merged {merged_overlap_count} overlapping SAM3 mask(s) in propagated cache")
         
         tracks_path = output_folder / 'mask_tracks.pkl'
         try:
@@ -1085,6 +1295,11 @@ def process_video_sam3(frames_folder, output_folder,
             if len(all_results) > 1:
                 tracks = match_masks_across_frames(all_results)
                 print(f"Regenerated {len(tracks)} mask tracks")
+
+        # Merging changes mask indices/counts, so previously saved tracks may be invalid.
+        if merged_overlap_count > 0 and len(all_results) > 1:
+            tracks = match_masks_across_frames(all_results)
+            print(f"Regenerated {len(tracks)} mask tracks after overlap merge")
     except FileNotFoundError:
         if masks_propagation and len(all_results) > 1:
             print(f"\nApplying temporal mask propagation...")
