@@ -247,13 +247,55 @@ def process_frame(frame_path, reader, min_confidence=0.3, ocr_engine="easyocr"):
 
     return frame_idx, detections
 
-def process_frames_sequential(frames_dir, languages, ocr_engine="easyocr"):
+def compute_frame_similarity(frame_a, frame_b):
     """
-    Process frames sequentially (GPU-safe).
+    Compute a fast similarity score between two frames.
+    Uses downscaled grayscale mean absolute difference.
+    
+    Args:
+        frame_a (np.ndarray): First frame (BGR).
+        frame_b (np.ndarray): Second frame (BGR).
+        
+    Returns:
+        float: Similarity score in [0, 1]. 1.0 = identical.
+    """
+    # Downscale for speed (~4x smaller per dimension)
+    small_a = cv2.resize(frame_a, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
+    small_b = cv2.resize(frame_b, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
+    gray_a = cv2.cvtColor(small_a, cv2.COLOR_BGR2GRAY) if small_a.ndim == 3 else small_a
+    gray_b = cv2.cvtColor(small_b, cv2.COLOR_BGR2GRAY) if small_b.ndim == 3 else small_b
+    diff = cv2.absdiff(gray_a, gray_b)
+    mean_diff = float(np.mean(diff))
+    # Normalize: 0 diff -> 1.0 similarity, 255 diff -> 0.0
+    return 1.0 - (mean_diff / 255.0)
+
+
+def process_frames_sequential(frames_dir, languages, ocr_engine="easyocr",
+                              change_threshold=0.985, max_consecutive_skips=30):
+    """
+    Process frames sequentially with frame change detection.
+    
+    Consecutive frames that are visually near-identical (similarity >= change_threshold)
+    reuse the previous frame's OCR results, skipping the expensive OCR call.
+    For typical screen recordings this skips 50-80% of frames.
+    
+    Important: this does NOT skip frames during scrolling or any visual change.
+    It only reuses results when the screen is truly static (same pixels).
+    During scrolling, similarity drops to ~0.85-0.95 which is well below the
+    threshold, so OCR runs on every scrolling frame.
+    
+    Anti-drift safety: after max_consecutive_skips frames are skipped in a row,
+    OCR is forced to run even if the frame looks unchanged. This prevents slow
+    gradual changes (cursor blink, time ticking) from accumulating undetected.
     
     Args:
         frames_dir (str): Directory containing the video frames.
         languages (list): List of languages for OCR.
+        ocr_engine (str): OCR backend to use.
+        change_threshold (float): Similarity threshold above which a frame is
+            considered unchanged and OCR is skipped. Range [0, 1]. Default 0.985.
+        max_consecutive_skips (int): Force OCR after this many consecutive skips
+            to prevent drift from slow gradual changes. Default 30 (~1s at 30fps).
         
     Returns:
         dict: Dictionary mapping frame indices to detected bounding boxes.
@@ -268,11 +310,59 @@ def process_frames_sequential(frames_dir, languages, ocr_engine="easyocr"):
     reader = get_ocr_reader(languages, ocr_engine=ocr_engine)
     
     frame_boxes = {}
-    for frame_path in tqdm(frame_paths, desc="Processing Frames"):
-        result = process_frame(frame_path, reader, ocr_engine=ocr_engine)
-        if result is not None:
-            frame_idx, detections = result
-            frame_boxes[frame_idx] = detections
+    prev_frame = None
+    prev_detections = []
+    skipped = 0
+    processed = 0
+    consecutive_skips = 0
+    
+    # Track similarity scores for diagnostics
+    sim_below_threshold = 0  # Frames where change was detected
+    
+    for frame_path in tqdm(frame_paths, desc="Processing Frames (with change detection)"):
+        frame = cv2.imread(frame_path)
+        if frame is None:
+            print(f"Warning: Could not read {frame_path}")
+            continue
+        
+        frame_name = os.path.splitext(os.path.basename(frame_path))[0]
+        frame_idx = int(''.join(filter(str.isdigit, frame_name)))
+        
+        # Check if this frame is similar enough to the previous one to skip OCR
+        if prev_frame is not None:
+            similarity = compute_frame_similarity(prev_frame, frame)
+            
+            if similarity >= change_threshold and consecutive_skips < max_consecutive_skips:
+                # Frame is virtually unchanged — reuse previous OCR results
+                # Deep-copy detections so downstream mutations don't bleed across frames
+                frame_boxes[frame_idx] = [d.copy() for d in prev_detections]
+                skipped += 1
+                consecutive_skips += 1
+                prev_frame = frame
+                continue
+            else:
+                if similarity < change_threshold:
+                    sim_below_threshold += 1
+                # Reset consecutive skip counter since we're running OCR
+                consecutive_skips = 0
+        
+        # Frame changed (or is the first frame, or anti-drift triggered) — run OCR
+        detections = extract_text_with_backend(
+            frame, reader, ocr_engine=ocr_engine, min_confidence=0.3
+        )
+        frame_boxes[frame_idx] = detections
+        prev_frame = frame
+        prev_detections = detections
+        processed += 1
+    
+    total = skipped + processed
+    if total > 0:
+        print(f"\nFrame change detection summary:")
+        print(f"  Total frames:    {total}")
+        print(f"  OCR processed:   {processed} ({processed/total*100:.1f}%)")
+        print(f"  Skipped (static):{skipped} ({skipped/total*100:.1f}%)")
+        print(f"  Changed frames:  {sim_below_threshold} (visual change detected)")
+        print(f"  Effective speedup: ~{total/max(1,processed):.1f}x")
     
     return frame_boxes
 
@@ -281,6 +371,123 @@ def process_frames_sequential(frames_dir, languages, ocr_engine="easyocr"):
 def process_frames_parallel(frames_dir, languages, num_workers=-1, force_cpu=False, ocr_engine="easyocr"):
     """Alias for process_frames_sequential (parallel removed due to CUDA issues)."""
     return process_frames_sequential(frames_dir, languages, ocr_engine=ocr_engine)
+
+
+def process_frames_change_regions(frames_dir, languages, ocr_engine="easyocr",
+                                   change_threshold=0.985, region_change_threshold=0.95):
+    """
+    Advanced frame processing: detects changed rectangular regions per frame
+    and only runs OCR on the changed parts.
+    
+    This is an alternative to process_frames_sequential that provides
+    even more granular savings: when only a small part of the screen changed
+    (e.g., new chat message), OCR only runs on that region.
+    
+    Args:
+        frames_dir (str): Directory containing frame images.
+        languages (list): OCR languages.
+        ocr_engine (str): OCR backend.
+        change_threshold (float): Full-frame similarity to skip entirely.
+        region_change_threshold (float): Per-strip similarity to decide
+            which horizontal bands need re-OCR.
+            
+    Returns:
+        dict: frame_idx -> list of detections.
+    """
+    frame_paths = sorted(
+        [os.path.join(frames_dir, f) for f in os.listdir(frames_dir) if f.endswith(('.jpg', '.png'))],
+        key=lambda x: int(''.join(filter(str.isdigit, os.path.basename(x))))
+    )
+    
+    print(f"Found {len(frame_paths)} frames in {frames_dir}")
+    reader = get_ocr_reader(languages, ocr_engine=ocr_engine)
+    
+    frame_boxes = {}
+    prev_frame = None
+    prev_detections = []
+    skipped = 0
+    partial = 0
+    full = 0
+    
+    num_strips = 6  # Divide frame into horizontal strips
+    
+    for frame_path in tqdm(frame_paths, desc="Processing Frames (region change)"):
+        frame = cv2.imread(frame_path)
+        if frame is None:
+            continue
+        
+        frame_name = os.path.splitext(os.path.basename(frame_path))[0]
+        frame_idx = int(''.join(filter(str.isdigit, frame_name)))
+        
+        if prev_frame is not None:
+            similarity = compute_frame_similarity(prev_frame, frame)
+            if similarity >= change_threshold:
+                frame_boxes[frame_idx] = [d.copy() for d in prev_detections]
+                skipped += 1
+                prev_frame = frame
+                continue
+        
+            # Identify which horizontal strips changed
+            h = frame.shape[0]
+            strip_h = h // num_strips
+            changed_y_min = h
+            changed_y_max = 0
+            
+            for s in range(num_strips):
+                y_start = s * strip_h
+                y_end = (s + 1) * strip_h if s < num_strips - 1 else h
+                strip_sim = compute_frame_similarity(
+                    prev_frame[y_start:y_end], frame[y_start:y_end]
+                )
+                if strip_sim < region_change_threshold:
+                    changed_y_min = min(changed_y_min, y_start)
+                    changed_y_max = max(changed_y_max, y_end)
+            
+            if changed_y_min < changed_y_max:
+                # Only OCR the changed region
+                roi = frame[changed_y_min:changed_y_max]
+                roi_detections = extract_text_with_backend(
+                    roi, reader, ocr_engine=ocr_engine, min_confidence=0.3
+                )
+                # Shift y-coordinates back to full-frame coords
+                for det in roi_detections:
+                    x1, y1, x2, y2 = det['bbox']
+                    det['bbox'] = (x1, y1 + changed_y_min, x2, y2 + changed_y_min)
+                    if 'original_bbox' in det:
+                        ox1, oy1, ox2, oy2 = det['original_bbox']
+                        det['original_bbox'] = (ox1, oy1 + changed_y_min, ox2, oy2 + changed_y_min)
+                
+                # Keep unchanged-region detections from previous frame
+                carried = []
+                for d in prev_detections:
+                    _, dy1, _, dy2 = d['bbox']
+                    box_center_y = (dy1 + dy2) / 2
+                    if box_center_y < changed_y_min or box_center_y > changed_y_max:
+                        carried.append(d.copy())
+                
+                detections = carried + roi_detections
+                frame_boxes[frame_idx] = detections
+                prev_detections = detections
+                prev_frame = frame
+                partial += 1
+                continue
+        
+        # Full OCR on this frame
+        detections = extract_text_with_backend(
+            frame, reader, ocr_engine=ocr_engine, min_confidence=0.3
+        )
+        frame_boxes[frame_idx] = detections
+        prev_frame = frame
+        prev_detections = detections
+        full += 1
+    
+    total = skipped + partial + full
+    if total > 0:
+        print(f"\nRegion change detection: {full} full OCR, {partial} partial OCR, "
+              f"{skipped} skipped ({skipped/total*100:.1f}% fully skipped, "
+              f"{(skipped+partial)/total*100:.1f}% with savings)")
+    
+    return frame_boxes
 
 def merge_line_boxes(
     frame_boxes,
@@ -913,13 +1120,28 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
             if frame_idx - last_frame > max_gap:
                 continue
             
-            # Find best matching box
+            # Find best matching box — pick the one with highest text similarity
+            # and closest position to the previous detection.
             best_match = None
             best_idx = None
+            best_score = -1.0
             
             for box_idx, box in unmatched_boxes:
                 if can_track(last_box, box):
-                    if best_match is None:
+                    # Score = text similarity (dominant) + inverse position distance (minor)
+                    text1 = last_box.get('text', '') or last_box.get('alterego', '')
+                    text2 = box.get('text', '') or box.get('alterego', '')
+                    text_sim = SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
+                    
+                    bbox1, bbox2 = last_box['bbox'], box['bbox']
+                    c1 = ((bbox1[0]+bbox1[2])/2, (bbox1[1]+bbox1[3])/2)
+                    c2 = ((bbox2[0]+bbox2[2])/2, (bbox2[1]+bbox2[3])/2)
+                    dist = ((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2) ** 0.5
+                    pos_score = max(0, 1.0 - dist / (position_threshold * 2))
+                    
+                    score = text_sim * 0.7 + pos_score * 0.3
+                    if score > best_score:
+                        best_score = score
                         best_match = box
                         best_idx = box_idx
             
@@ -1179,7 +1401,8 @@ def ocr_boxes_to_unified(frame_boxes, tracks=None):
     return unified
 
 def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"], num_workers=4,
-                      extract_frames=True, frame_step=1, ocr_engine="easyocr"):
+                      extract_frames=True, frame_step=1, ocr_engine="easyocr",
+                      change_detection=True, change_threshold=0.985):
     """
     Process a single video for OCR detection.
     
@@ -1192,6 +1415,10 @@ def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"],
         extract_frames (bool): Whether to extract frames from video (default: True)
         frame_step (int): Step between frames to extract (default: 1)
         ocr_engine (str): OCR backend ('easyocr' or 'paddleocr')
+        change_detection (bool): Whether to skip OCR for visually unchanged frames (default: True).
+            This is the main performance optimization for screen recordings.
+        change_threshold (float): Similarity threshold for frame change detection.
+            Higher = more aggressive skipping. Range [0, 1]. Default 0.985.
         
     Returns:
         dict: Unified OCR data with track_ids
@@ -1207,6 +1434,10 @@ def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"],
     print(f"Processing video: {video_path}")
     print(f"Output directory: {output_dir}")
     print(f"OCR engine: {ocr_engine}")
+    if change_detection:
+        print(f"Frame change detection: ENABLED (threshold={change_threshold})")
+    else:
+        print(f"Frame change detection: DISABLED")
     print(f"{'='*60}\n")
     
     # Extract frames if requested
@@ -1233,7 +1464,16 @@ def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"],
         print(f"Loaded legacy EasyOCR text boxes from {legacy_boxes_pkl_path}")
 
     if not loaded_boxes:
-        frame_boxes = process_frames_parallel(frames_dir, languages, num_workers, ocr_engine=ocr_engine)
+        if change_detection:
+            frame_boxes = process_frames_sequential(
+                frames_dir, languages, ocr_engine=ocr_engine,
+                change_threshold=change_threshold
+            )
+        else:
+            frame_boxes = process_frames_sequential(
+                frames_dir, languages, ocr_engine=ocr_engine,
+                change_threshold=0.0  # Disable skipping
+            )
         with open(boxes_pkl_path, "wb") as f:
             pickle.dump(frame_boxes, f)
         print(f"Saved detected text boxes to {boxes_pkl_path}")

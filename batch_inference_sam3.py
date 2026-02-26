@@ -1422,7 +1422,7 @@ def process_videos_sam3_batch(video_folders, text_prompt="profile image, profile
             continue
         
         try:
-            unified = process_video_sam3_ultralytics(
+            unified = process_video_sam3(
                 frames_folder=frames_folder,
                 output_folder=video_folder,
                 text_prompt=text_prompt,

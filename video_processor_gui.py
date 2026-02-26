@@ -148,7 +148,11 @@ class VideoProcessorGUI:
         
         self.skip_transitions_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(options_frame, text="Skip transitions", 
-                       variable=self.skip_transitions_var).pack(side=tk.LEFT)
+                       variable=self.skip_transitions_var).pack(side=tk.LEFT, padx=(0, 15))
+        
+        self.ocr_change_detect_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="OCR change detection (faster)", 
+                       variable=self.ocr_change_detect_var).pack(side=tk.LEFT)
         
         # === CONTROL SECTION ===
         control_frame = ttk.Frame(main_frame)
@@ -281,17 +285,19 @@ class VideoProcessorGUI:
         ocr_engine = "easyocr"
         sam3_prompt = self.sam3_prompt_var.get()
         sam3_device = self.sam3_device_var.get()
+        ocr_change_detection = self.ocr_change_detect_var.get()
         
         # Start processing in background thread
         thread = threading.Thread(
             target=self._processing_thread,
-            args=(frame_step, ocr_languages, ocr_engine, sam3_prompt, sam3_device),
+            args=(frame_step, ocr_languages, ocr_engine, sam3_prompt, sam3_device,
+                  ocr_change_detection),
             daemon=True
         )
         thread.start()
     
     def _processing_thread(self, frame_step, ocr_languages, ocr_engine,
-                          sam3_prompt, sam3_device):
+                          sam3_prompt, sam3_device, ocr_change_detection=True):
         """Background thread for processing videos"""
         # Redirect stdout to log
         import io
@@ -325,7 +331,8 @@ class VideoProcessorGUI:
                     extract_frames=not self.skip_frames_var.get(),
                     run_ocr=not self.skip_ocr_var.get(),
                     run_sam3=not self.skip_sam3_var.get(),
-                    run_transitions=not self.skip_transitions_var.get()
+                    run_transitions=not self.skip_transitions_var.get(),
+                    ocr_change_detection=ocr_change_detection
                 )
             else:
                 process_multiple_videos(
@@ -340,7 +347,8 @@ class VideoProcessorGUI:
                     extract_frames=not self.skip_frames_var.get(),
                     run_ocr=not self.skip_ocr_var.get(),
                     run_sam3=not self.skip_sam3_var.get(),
-                    run_transitions=not self.skip_transitions_var.get()
+                    run_transitions=not self.skip_transitions_var.get(),
+                    ocr_change_detection=ocr_change_detection
                 )
             
             self.log_queue.put("\n✓ Processing complete!")

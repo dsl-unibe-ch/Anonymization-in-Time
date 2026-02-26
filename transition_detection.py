@@ -39,7 +39,8 @@ def detect_scene_transitions(video_path, threshold=0.25, min_transition_frames=2
     # Read first frame
     ret, prev_frame = cap.read()
     if not ret:
-        return []
+        cap.release()
+        return [], None
     
     # Prepare previous frame data
     prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
@@ -157,6 +158,7 @@ def detect_scene_transitions(video_path, threshold=0.25, min_transition_frames=2
         print(f"  Expanded frames {start}-{end} ({duration_processed} frames, {duration_seconds:.2f}s)")
     
     # Save transitions to text file for manual review/editing
+    output_file = None
     if save_to_file:
         output_file = save_transitions_to_file(merged_transitions, video_path, output_dir)
     

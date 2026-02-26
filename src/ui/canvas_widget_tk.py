@@ -260,7 +260,7 @@ class CanvasWidget(tk.Canvas):
                 mask_bool = rebuild_full_mask(mask, orig_shape)
                 
                 # Convert to PIL and scale to display size
-                mask_img = Image.fromarray((mask_bool * 255).astype(np.uint8), mode='L')
+                mask_img = Image.fromarray(((mask_bool > 0) * 255).astype(np.uint8), mode='L')
                 mask_img = mask_img.resize(overlay.size, Image.Resampling.NEAREST)
             else:
                 # Regular numpy array mask

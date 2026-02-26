@@ -359,6 +359,8 @@ class MainWindow:
         self._update_status(f"Blur preview {state}", timeout=2000)
         
         # Reload current frame to apply/remove preview
+        if not self.annotation_manager.frame_indices:
+            return
         frame_idx = self.annotation_manager.frame_indices[self.current_position]
         annotations = self.annotation_manager.get_frame_annotations(frame_idx)
         is_transition = self.transition_manager.is_in_transition(frame_idx)
@@ -560,6 +562,8 @@ class MainWindow:
     
     def _mark_transition_start(self):
         """Mark current frame as transition start."""
+        if not self.annotation_manager.frame_indices:
+            return
         self.transition_start_frame = self.annotation_manager.frame_indices[self.current_position]
         self._update_labels(self.annotation_manager.frame_indices[self.current_position])
         self._update_status(f"Marked frame {self.transition_start_frame} as transition start. Navigate to end frame and press 'E'.", timeout=5000)
@@ -570,6 +574,8 @@ class MainWindow:
             messagebox.showwarning("No Start Frame", "Please mark a transition start frame first (press 'T')")
             return
         
+        if not self.annotation_manager.frame_indices:
+            return
         end_frame = self.annotation_manager.frame_indices[self.current_position]
         
         if end_frame < self.transition_start_frame:
@@ -586,6 +592,8 @@ class MainWindow:
     
     def _remove_current_transition(self):
         """Remove the transition range containing the current frame."""
+        if not self.annotation_manager.frame_indices:
+            return
         current_frame = self.annotation_manager.frame_indices[self.current_position]
         
         if self.transition_manager.remove_transition_at_frame(current_frame):

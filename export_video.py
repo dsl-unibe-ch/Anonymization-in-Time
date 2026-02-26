@@ -370,9 +370,28 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
     
     # Auto-detect FPS if not provided
     if fps is None:
-        # Try to estimate from frame filenames or default to 30
-        fps = 30.0
-        print(f"Using default FPS: {fps}")
+        # Try to find the original video in the parent directory to read its FPS
+        detected_fps = None
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm']
+        video_name = video_dir.name
+        # Check parent dir for a video matching the folder name
+        parent = video_dir.parent
+        for ext in video_extensions:
+            candidate = parent / f"{video_name}{ext}"
+            if candidate.exists():
+                cap = cv2.VideoCapture(str(candidate))
+                try:
+                    fps_val = cap.get(cv2.CAP_PROP_FPS)
+                    if fps_val and fps_val > 0:
+                        detected_fps = float(fps_val)
+                        print(f"Auto-detected FPS from {candidate.name}: {detected_fps}")
+                finally:
+                    cap.release()
+                break
+        
+        fps = detected_fps if detected_fps else 30.0
+        if detected_fps is None:
+            print(f"Could not auto-detect FPS, using default: {fps}")
     else:
         print(f"Using specified FPS: {fps}")
     
@@ -392,8 +411,15 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
     print(f"Transition blur strength: {transition_blur_strength}")
     print(f"OCR blur: {ocr_blur}, SAM3 blur: {sam3_blur}, Transition blur: {transition_blur}\n")
     
-    # Process each frame
-    for frame_idx, frame_file in enumerate(tqdm(frame_files, desc="Exporting video")):
+    # Process each frame — use the frame index from the filename, not enumeration order.
+    # Annotations are keyed by the actual frame index (extracted from the filename
+    # during OCR/SAM3 processing), which differs from enumeration order when
+    # frame_step > 1 (e.g., filenames 0000, 0002, 0004 → indices 0, 2, 4).
+    for frame_file in tqdm(frame_files, desc="Exporting video"):
+        # Extract actual frame index from filename
+        frame_stem = frame_file.stem
+        frame_idx = int(''.join(filter(str.isdigit, frame_stem)))
+        
         # Read frame
         frame = cv2.imread(str(frame_file))
         if frame is None:

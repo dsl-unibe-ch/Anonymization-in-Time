@@ -87,7 +87,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
                         ocr_languages=["en", "de"], ocr_workers=4,
                         sam3_prompt="profile image, profile picture", sam3_batch_size=2,
                         sam3_device='auto', frame_step=1, ocr_engine="easyocr",
-                        extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
+                        extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True,
+                        ocr_change_detection=True, ocr_change_threshold=0.985):
     """
     Process a single video through the complete pipeline.
     
@@ -106,6 +107,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
+        ocr_change_detection (bool): Skip OCR for visually unchanged frames (default: True)
+        ocr_change_threshold (float): Similarity threshold for change detection (default: 0.985)
         
     Returns:
         dict: Results containing paths to all generated files
@@ -168,7 +171,9 @@ def process_single_video(video_path, output_base_dir, dict_path,
                 num_workers=ocr_workers,
                 extract_frames=False,  # Already extracted
                 frame_step=frame_step,
-                ocr_engine=ocr_engine
+                ocr_engine=ocr_engine,
+                change_detection=ocr_change_detection,
+                change_threshold=ocr_change_threshold
             )
             raw_ocr_boxes = video_output_dir / f"boxes_{ocr_engine}.pkl"
             if raw_ocr_boxes.exists():
@@ -268,7 +273,8 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                            ocr_languages=["en", "de"], ocr_workers=4,
                            sam3_prompt="profile image, profile picture", sam3_batch_size=2,
                            sam3_device='auto', frame_step=1, ocr_engine="easyocr",
-                           extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
+                           extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True,
+                           ocr_change_detection=True, ocr_change_threshold=0.985):
     """
     Process multiple videos through the complete pipeline.
     
@@ -287,6 +293,8 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
+        ocr_change_detection (bool): Skip OCR for visually unchanged frames (default: True)
+        ocr_change_threshold (float): Similarity threshold for change detection (default: 0.985)
         
     Returns:
         list: List of result dictionaries for each video
@@ -323,7 +331,9 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                 extract_frames=extract_frames,
                 run_ocr=run_ocr,
                 run_sam3=run_sam3,
-                run_transitions=run_transitions
+                run_transitions=run_transitions,
+                ocr_change_detection=ocr_change_detection,
+                ocr_change_threshold=ocr_change_threshold
             )
             all_results.append(result)
         except Exception as e:
@@ -391,6 +401,13 @@ def main():
     parser.add_argument('--sam3_device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'],
                        help='Device for SAM3 (default: auto)')
     
+    # OCR speed options
+    parser.add_argument('--no_ocr_change_detection', action='store_true',
+                       help='Disable frame change detection for OCR (slower but processes every frame)')
+    parser.add_argument('--ocr_change_threshold', type=float, default=0.985,
+                       help='Similarity threshold for OCR frame change detection (default: 0.985). '
+                            'Higher = more aggressive skipping. Range [0, 1].')
+    
     args = parser.parse_args()
     
     # Validate inputs
@@ -441,7 +458,9 @@ def main():
             extract_frames=not args.skip_frames,
             run_ocr=not args.skip_ocr,
             run_sam3=not args.skip_sam3,
-            run_transitions=not args.skip_transitions
+            run_transitions=not args.skip_transitions,
+            ocr_change_detection=not args.no_ocr_change_detection,
+            ocr_change_threshold=args.ocr_change_threshold
         )
     else:
         process_multiple_videos(
@@ -458,7 +477,9 @@ def main():
             extract_frames=not args.skip_frames,
             run_ocr=not args.skip_ocr,
             run_sam3=not args.skip_sam3,
-            run_transitions=not args.skip_transitions
+            run_transitions=not args.skip_transitions,
+            ocr_change_detection=not args.no_ocr_change_detection,
+            ocr_change_threshold=args.ocr_change_threshold
         )
 
 

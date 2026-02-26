@@ -103,7 +103,17 @@ def assign_unique_ids(frames: Dict[int, list]) -> Dict[int, list]:
     Returns:
         Updated annotations with unique IDs
     """
-    unique_id = 0
+    # Collect existing IDs to avoid collisions
+    existing_ids = set()
+    for frame_idx in frames.keys():
+        for annotation in frames[frame_idx]:
+            if 'id' in annotation:
+                try:
+                    existing_ids.add(int(annotation['id']))
+                except (TypeError, ValueError):
+                    pass
+    
+    unique_id = (max(existing_ids) + 1) if existing_ids else 0
     
     for frame_idx in sorted(frames.keys()):
         for annotation in frames[frame_idx]:
