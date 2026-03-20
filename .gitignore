@@ -31,7 +31,7 @@ ENV/
 *.swp
 *.swo
 
-# Data files (optional - uncomment if you don't want to track data)
+# Data files
 data/
 
 # OS
@@ -40,3 +40,10 @@ Thumbs.db
 
 # SAM3 model
 sam3.pt
+
+# Claude
+.claude
+
+# Test
+docs/
+other_src/
