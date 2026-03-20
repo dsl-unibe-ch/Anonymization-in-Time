@@ -764,7 +764,7 @@ def split_boxes_into_words(frame_boxes):
                 # No component info — fall back to proportional splitting
                 box_width = x2 - x1
                 padding = max(2, int(box_width * 0.02))
-                total_word_chars = sum(len(word) for word in words)
+                total_word_chars = max(1, sum(len(word) for word in words))
                 content_start = x1 + padding
                 content_end = x2 - padding
                 content_width = max(1, content_end - content_start)
@@ -1002,8 +1002,13 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
         # Get parent box if available
         parent_box = boxes[0].get('parent_box', None)
         parent_box_text = boxes[0].get('parent_box_text', None)
+        # Extract the parent (integer) track_id from the word-level tuple form.
+        # Word splitting turns track_id 5 into (5, 0), (5, 1), etc.
+        # For merged name boxes we want the original parent track_id back.
         track_ids = [b.get('track_id') for b in boxes if b.get('track_id') is not None]
         track_id = track_ids[0] if track_ids else None
+        if isinstance(track_id, tuple):
+            track_id = track_id[0]
         if parent_box is not None:
             parent_box = _bbox_to_int_tuple(parent_box)
         
@@ -1239,6 +1244,19 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
             stabilized_box['text'] = best_text
             stabilized_box['track_id'] = track_id
 
+            # Shift component_boxes by the same delta so word splitting
+            # uses boundaries consistent with the stabilized parent box.
+            comp = stabilized_box.get('component_boxes')
+            if comp:
+                orig_x1, orig_y1 = int(round(raw_x1[i])), int(round(raw_y1[i]))
+                dx = x1 - orig_x1
+                dy = y1 - orig_y1
+                if dx != 0 or dy != 0:
+                    shifted = []
+                    for (cx1, cy1, cx2, cy2), ctxt in comp:
+                        shifted.append(((cx1 + dx, cy1 + dy, cx2 + dx, cy2 + dy), ctxt))
+                    stabilized_box['component_boxes'] = shifted
+
             stabilized_boxes[frame_idx].append(stabilized_box)
             track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id
     
@@ -1389,27 +1407,19 @@ def align_boxes_on_same_line(frame_boxes, y_threshold=15):
     
     return aligned_boxes
 
-def ocr_boxes_to_unified(frame_boxes, tracks=None):
+def ocr_boxes_to_unified(frame_boxes):
     """
     Convert OCR box mapping to unified format:
-    {frame_idx: [{'bbox': (x1,y1,x2,y2), 'score': float, 'label': None,
+    {frame_idx: [{'bbox': (x1,y1,x2,y2), 'score': float,
                   'text': str, 'mask': None, 'source': 'ocr',
                   'to_show': bool, 'alterego': str, 'name': str, 'track_id': int or None}, ...]}
-    
+
     Args:
         frame_boxes (dict): Dictionary of frame indices to list of boxes
-        tracks (list): List of tracks, each track is a list of (frame_idx, box_idx) tuples
-    
+
     Returns:
         dict: Unified format dictionary with track_id field
     """
-    # Build track_map: (frame_idx, box_idx) -> track_id
-    track_map = {}
-    if tracks:
-        for track_id, track in enumerate(tracks):
-            for frame_idx, box_idx in track:
-                track_map[(frame_idx, box_idx)] = track_id
-    
     unified = {}
     for frame_idx, boxes in frame_boxes.items():
         unified_list = []
@@ -1418,18 +1428,19 @@ def ocr_boxes_to_unified(frame_boxes, tracks=None):
             if not bbox:
                 continue
             x1, y1, x2, y2 = _bbox_to_int_tuple(bbox)
-            
+
             parent_box = box.get('parent_box', None)
             if parent_box is not None:
                 try:
                     parent_box = _bbox_to_int_tuple(parent_box)
                 except Exception:
                     parent_box = None
-            
-            # Get track_id for this box
+
+            # Get track_id — normalise word-level tuple (parent_tid, word_idx)
+            # back to the parent integer so toggle propagation works correctly.
             track_id = box.get('track_id')
-            if track_id is None:
-                track_id = track_map.get((frame_idx, i), None)
+            if isinstance(track_id, tuple):
+                track_id = track_id[0]
             
             entry = {
                 "bbox": (x1, y1, x2, y2),
@@ -1545,7 +1556,7 @@ def process_video_ocr(video_path, output_dir, dict_path, languages=["en", "de"],
     filtered_frame_boxes = filter_boxes_by_names(frame_boxes, names_to_detect)
     
     # Convert to unified format
-    unified = ocr_boxes_to_unified(filtered_frame_boxes, tracks=ocr_tracks)
+    unified = ocr_boxes_to_unified(filtered_frame_boxes)
     
     # Save final output
     with open(output_pkl_path, 'wb') as f:
