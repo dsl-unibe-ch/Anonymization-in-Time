@@ -14,77 +14,7 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image, ImageDraw, ImageFont
 
-
-def unpack_mask_if_needed(mask_data):
-    """
-    Unpack a mask if it's in packed format.
-    
-    Args:
-        mask_data: Either a packed dict or numpy array
-        
-    Returns:
-        tuple: (mask_array, bbox) where bbox is (x1, y1, x2, y2) or None
-    """
-    if isinstance(mask_data, dict) and "packed" in mask_data:
-        # Packed format
-        h, w = mask_data["shape"]
-        flat = np.unpackbits(mask_data["packed"])[: h * w]
-        mask_crop = flat.reshape((h, w)).astype(bool)
-        bbox = mask_data["bbox"]
-        return mask_crop, bbox
-    else:
-        # Regular numpy array
-        return np.array(mask_data, dtype=bool), None
-
-
-def rebuild_full_mask(mask_data, img_shape):
-    """
-    Rebuild a full-frame mask from packed/cropped data.
-    
-    Args:
-        mask_data: Packed mask dict or numpy array
-        img_shape: Target image shape (H, W)
-        
-    Returns:
-        Full-frame boolean mask
-    """
-    crop, bbox = unpack_mask_if_needed(mask_data)
-    
-    if bbox is None:
-        # Already full-frame
-        if crop.shape[:2] == img_shape[:2]:
-            return crop.astype(bool)
-        # Resize to match
-        return cv2.resize(
-            crop.astype(np.float32),
-            (img_shape[1], img_shape[0]),
-            interpolation=cv2.INTER_NEAREST
-        ) > 0.5
-    
-    # Unpack bbox
-    x1, y1, x2, y2 = [int(v) for v in bbox]
-    
-    # Clamp to image bounds
-    x1 = max(0, min(x1, img_shape[1] - 1))
-    x2 = max(0, min(x2, img_shape[1]))
-    y1 = max(0, min(y1, img_shape[0] - 1))
-    y2 = max(0, min(y2, img_shape[0]))
-    
-    h = y2 - y1
-    w = x2 - x1
-    
-    # Resize crop if needed
-    if crop.shape[0] != h or crop.shape[1] != w:
-        crop = cv2.resize(
-            crop.astype(np.float32),
-            (w, h),
-            interpolation=cv2.INTER_NEAREST
-        ) > 0.5
-    
-    # Place in full frame
-    full = np.zeros(img_shape[:2], dtype=bool)
-    full[y1:y2, x1:x2] = crop.astype(bool)
-    return full
+from src.utils.mask_utils import rebuild_full_mask
 
 
 def apply_blur_to_region(image, mask, blur_strength=51):

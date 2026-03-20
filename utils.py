@@ -55,8 +55,13 @@ def extract_video_frames(video_path, output_dir=None, frame_step=1, starting_sec
         if result.returncode == 0 and result.stdout.strip() and result.stdout.strip() != 'N/A':
             sar_str = result.stdout.strip()
             if ':' in sar_str:
-                sar_num, sar_den = map(int, sar_str.split(':'))
-                print(f"Detected Sample Aspect Ratio (SAR): {sar_num}:{sar_den}")
+                parts = sar_str.split(':')
+                if len(parts) == 2 and all(p.strip().isdigit() for p in parts):
+                    sar_num, sar_den = int(parts[0]), int(parts[1])
+                    if sar_den == 0:
+                        sar_num, sar_den = 1, 1
+                    else:
+                        print(f"Detected Sample Aspect Ratio (SAR): {sar_num}:{sar_den}")
     except:
         pass  # ffprobe not available or failed
     

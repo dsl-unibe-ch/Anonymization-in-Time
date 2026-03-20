@@ -1108,7 +1108,7 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
             return x_distance < position_threshold * 0.5 and y_distance < position_threshold * 0.5 and size_diff < size_threshold * 0.8
     
     if not frame_boxes:
-        return frame_boxes
+        return {}, []
 
     # Build tracks and apply frame-to-frame stabilization
     frame_indices = sorted(frame_boxes.keys())
