@@ -609,6 +609,16 @@ def merge_line_boxes(
             merged["text"] = " ".join(text_parts)
         if confidences:
             merged["confidence"] = sum(confidences) / float(len(confidences))
+
+        # Preserve original OCR-detected box boundaries so that
+        # split_boxes_into_words can use them as accurate split points
+        # instead of guessing proportionally by character count.
+        merged["component_boxes"] = [
+            (_bbox_to_int_tuple(b["bbox"]), (b.get("text") or "").strip())
+            for b in valid_bbox_entries
+            if (b.get("text") or "").strip()
+        ]
+
         return merged
 
     for frame_idx, boxes in frame_boxes.items():
@@ -692,65 +702,107 @@ def split_boxes_into_words(frame_boxes):
                 split_boxes.append(box_copy)
                 continue
             
-            # Multi-word box - split it proportionally based on word lengths
+            # Multi-word box - split into individual word boxes
             x1, y1, x2, y2 = _bbox_to_int_tuple(box['bbox'])
             parent_bbox = _bbox_to_int_tuple(box.get('original_bbox', box['bbox']))
-            box_width = x2 - x1
-            
-            # Estimate padding (typically ~2% of box width or min 2 pixels on each side)
-            padding = max(2, int(box_width * 0.02))
-            
-            # Calculate total characters in all words
-            total_word_chars = sum(len(word) for word in words)
-            
-            # Split the content area (box minus padding) proportionally among words
-            content_start = x1 + padding
-            content_end = x2 - padding
-            content_width = max(1, content_end - content_start)
-            
-            current_x = x1  # Start from original box edge (includes padding for first word)
-            word_boxes = []
-            
-            for i, word in enumerate(words):
-                word_length = len(word)
-                
-                if i == 0:
-                    # First word: start from parent box edge (includes left padding)
-                    word_x1 = x1
-                    # End at proportional position in content area
-                    word_proportion = word_length / total_word_chars
-                    word_x2 = content_start + int(word_proportion * content_width)
-                elif i == len(words) - 1:
-                    # Last word: start where previous ended, extend to parent box edge (includes right padding)
-                    word_x1 = current_x
-                    word_x2 = x2
-                else:
-                    # Middle words: split proportionally within content area
-                    word_x1 = current_x
-                    word_proportion = word_length / total_word_chars
-                    word_x2 = content_start + int(sum(len(words[j]) for j in range(i + 1)) / total_word_chars * content_width)
-                
-                word_x1 = int(max(x1, min(x2, word_x1)))
-                word_x2 = int(max(word_x1, min(x2, word_x2)))
-                
-                # Derive a unique word-level track_id from the parent
-                # line track_id + word index so that toggling one word
-                # does NOT propagate to sibling words in the same line.
-                parent_tid = box.get('track_id', None)
-                word_tid = (parent_tid, i) if parent_tid is not None else None
-                
-                word_boxes.append({
-                    'bbox': (word_x1, y1, word_x2, y2),
-                    'text': word,
-                    'confidence': box.get('confidence', 1.0),
-                    'parent_box': parent_bbox,
-                    'parent_box_text': text,  # Save full parent text for matching
-                    'track_id': word_tid,
-                })
-                
-                current_x = word_x2
-            
-            split_boxes.extend(word_boxes)
+            parent_tid = box.get('track_id', None)
+
+            # If merge_line_boxes saved the original OCR-detected component
+            # boundaries, use them as accurate split guides instead of
+            # guessing proportionally by character count.
+            component_boxes = box.get('component_boxes')
+            if component_boxes and len(component_boxes) > 1:
+                # Build a flat list of (word, component_bbox) using the
+                # original per-component bboxes.  Words within a single
+                # component still need proportional splitting, but the
+                # inter-component boundaries come from the real OCR output.
+                word_boxes = []
+                global_word_idx = 0
+
+                for comp_bbox, comp_text in component_boxes:
+                    comp_words = comp_text.split()
+                    if not comp_words:
+                        continue
+                    cx1, _, cx2, _ = _bbox_to_int_tuple(comp_bbox)
+                    comp_w = max(1, cx2 - cx1)
+
+                    if len(comp_words) == 1:
+                        word_tid = (parent_tid, global_word_idx) if parent_tid is not None else None
+                        word_boxes.append({
+                            'bbox': (cx1, y1, cx2, y2),
+                            'text': comp_words[0],
+                            'confidence': box.get('confidence', 1.0),
+                            'parent_box': parent_bbox,
+                            'parent_box_text': text,
+                            'track_id': word_tid,
+                        })
+                        global_word_idx += 1
+                    else:
+                        # Proportional split within this single component
+                        total_c = sum(len(w) for w in comp_words)
+                        cur_x = cx1
+                        for j, cw in enumerate(comp_words):
+                            if j == len(comp_words) - 1:
+                                wx1, wx2 = cur_x, cx2
+                            else:
+                                wx1 = cur_x
+                                wx2 = cx1 + int(round(sum(len(comp_words[k]) for k in range(j + 1)) / total_c * comp_w))
+                            word_tid = (parent_tid, global_word_idx) if parent_tid is not None else None
+                            word_boxes.append({
+                                'bbox': (int(wx1), y1, int(wx2), y2),
+                                'text': cw,
+                                'confidence': box.get('confidence', 1.0),
+                                'parent_box': parent_bbox,
+                                'parent_box_text': text,
+                                'track_id': word_tid,
+                            })
+                            cur_x = wx2
+                            global_word_idx += 1
+
+                split_boxes.extend(word_boxes)
+            else:
+                # No component info — fall back to proportional splitting
+                box_width = x2 - x1
+                padding = max(2, int(box_width * 0.02))
+                total_word_chars = sum(len(word) for word in words)
+                content_start = x1 + padding
+                content_end = x2 - padding
+                content_width = max(1, content_end - content_start)
+
+                current_x = x1
+                word_boxes = []
+
+                for i, word in enumerate(words):
+                    word_length = len(word)
+
+                    if i == 0:
+                        word_x1 = x1
+                        word_proportion = word_length / total_word_chars
+                        word_x2 = content_start + int(word_proportion * content_width)
+                    elif i == len(words) - 1:
+                        word_x1 = current_x
+                        word_x2 = x2
+                    else:
+                        word_x1 = current_x
+                        word_x2 = content_start + int(sum(len(words[j]) for j in range(i + 1)) / total_word_chars * content_width)
+
+                    word_x1 = int(max(x1, min(x2, word_x1)))
+                    word_x2 = int(max(word_x1, min(x2, word_x2)))
+
+                    word_tid = (parent_tid, i) if parent_tid is not None else None
+
+                    word_boxes.append({
+                        'bbox': (word_x1, y1, word_x2, y2),
+                        'text': word,
+                        'confidence': box.get('confidence', 1.0),
+                        'parent_box': parent_bbox,
+                        'parent_box_text': text,
+                        'track_id': word_tid,
+                    })
+
+                    current_x = word_x2
+
+                split_boxes.extend(word_boxes)
         
         split_frame_boxes[frame_idx] = split_boxes
     
