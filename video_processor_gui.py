@@ -219,7 +219,10 @@ class VideoProcessorGUI:
             for ext in video_extensions:
                 self.video_paths.extend(folder_path.glob(f'*{ext}'))
                 self.video_paths.extend(folder_path.glob(f'*{ext.upper()}'))
-            
+            # Sort alphabetically so processing order is predictable
+            # (e.g., 06-LAET-001, 06-LAET-002, 06-LAET-003, ...)
+            self.video_paths.sort(key=lambda p: p.name.lower())
+
             if self.video_paths:
                 self._update_video_label()
                 self._check_ready()
