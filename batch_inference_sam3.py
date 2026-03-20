@@ -434,7 +434,7 @@ def circularize_results(
     radius_normalization=True,
     max_radius_clusters=2,
     radius_merge_threshold=0.2,
-    circle_padding_px=2.0,
+    circle_padding_px=6.0,
     ):
     """
     Create circular masks around each SAM3 mask and return a new results list.
@@ -518,7 +518,12 @@ def circularize_results(
     def _snap_radius(r):
         if not global_radius_centers:
             return float(r)
-        return float(min(global_radius_centers, key=lambda c: abs(c - r)))
+        snapped = float(min(global_radius_centers, key=lambda c: abs(c - r)))
+        # Never let snapping shrink the radius by more than 5% — that creates
+        # visible rings around profile pictures.
+        if snapped < r * 0.95:
+            return float(r)
+        return snapped
 
     # Compute a stable target radius per track (prefer non-partial frames).
     track_target_radius = {}
