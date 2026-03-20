@@ -784,16 +784,31 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
         """Check if word matches a part of a name"""
         norm_word = normalize_text(word_text)
         norm_name = normalize_text(name_part)
-        
+
+        if not norm_word or not norm_name:
+            return False, 0.0
+
         # Exact match
         if norm_word == norm_name:
             return True, 1.0
-        
+
+        # For short words (<=4 chars), a single OCR character substitution
+        # tanks the SequenceMatcher ratio (e.g. "vlo" vs "v/o" = 0.67).
+        # Use edit-distance tolerance instead: accept if at most 1 char differs
+        # and the lengths are close.
+        if max(len(norm_word), len(norm_name)) <= 4:
+            if abs(len(norm_word) - len(norm_name)) <= 1:
+                # Count character-level differences (simple edit distance approx)
+                diffs = sum(1 for a, b in zip(norm_word, norm_name) if a != b)
+                diffs += abs(len(norm_word) - len(norm_name))
+                if diffs <= 1:
+                    return True, 0.85
+
         # Fuzzy match
         similarity = SequenceMatcher(None, norm_word, norm_name).ratio()
         if similarity >= similarity_threshold:
             return True, similarity
-            
+
         return False, 0.0
     
     def group_boxes_into_lines(boxes):
