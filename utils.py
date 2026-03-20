@@ -264,6 +264,34 @@ def make_circular_mask_from_mask(mask_bool: np.ndarray) -> np.ndarray:
     return circle
 
 
+def centered_median_smooth(values, window=5):
+    """
+    Centered rolling median filter with no directional lag.
+
+    Unlike causal (forward-only) filters, this looks equally at past and future
+    frames, eliminating the tracking delay that plagues EMA/threshold-based
+    stabilization in offline (non-realtime) pipelines.
+
+    Args:
+        values: Sequence of numeric values (one per frame in a track).
+        window: Odd window size (default 5 = 2 frames each side).
+
+    Returns:
+        List of smoothed values, same length as input.
+    """
+    n = len(values)
+    if n <= 1:
+        return list(values)
+    half = window // 2
+    arr = np.asarray(values, dtype=np.float64)
+    result = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        start = max(0, i - half)
+        end = min(n, i + half + 1)
+        result[i] = np.median(arr[start:end])
+    return result.tolist()
+
+
 def export_ocr_text_timeline(
     ocr_data_or_path,
     output_path: str | os.PathLike,

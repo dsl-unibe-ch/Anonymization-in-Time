@@ -27,7 +27,7 @@ except ImportError:
     print("Error: Ultralytics SAM3 not found. Install with: pip install ultralytics")
     exit(1)
 
-from utils import resolve_device, cleanup_device, make_circular_mask_from_mask
+from utils import resolve_device, cleanup_device, make_circular_mask_from_mask, centered_median_smooth
 
 
 def setup_predictor(device="auto", model_path="sam3.pt", conf=0.25, half=True):
@@ -323,45 +323,6 @@ def _circle_params_from_mask(full_mask, img_shape=None):
     return info["params"]
 
 
-def _stabilize_circle_params(current_params, prev_params, movement_threshold=0.75, radius_rel_tol=0.12):
-    """
-    Stabilize circle center/radius using OCR-style directional stabilization.
-
-    - Small center jitter -> freeze center
-    - Predominantly horizontal motion -> preserve y
-    - Predominantly vertical motion -> preserve x
-    - Radius jitter -> keep previous radius unless change looks real
-    """
-    if current_params is None:
-        return prev_params
-    if prev_params is None:
-        return current_params
-
-    curr_cx, curr_cy, curr_r = [float(v) for v in current_params]
-    prev_cx, prev_cy, prev_r = [float(v) for v in prev_params]
-
-    dx = abs(curr_cx - prev_cx)
-    dy = abs(curr_cy - prev_cy)
-
-    if dx < movement_threshold and dy < movement_threshold:
-        stable_cx, stable_cy = prev_cx, prev_cy
-    elif dy < movement_threshold or dy < dx / 2.0:
-        stable_cx, stable_cy = curr_cx, prev_cy
-    elif dx < movement_threshold or dx < dy / 2.0:
-        stable_cx, stable_cy = prev_cx, curr_cy
-    else:
-        stable_cx, stable_cy = curr_cx, curr_cy
-
-    if prev_r <= 0:
-        stable_r = curr_r
-    else:
-        rel_diff = abs(curr_r - prev_r) / max(prev_r, 1.0)
-        # Radius for a profile image should be very stable within one track.
-        stable_r = prev_r if rel_diff > radius_rel_tol else curr_r
-
-    return (float(stable_cx), float(stable_cy), float(stable_r))
-
-
 def _circle_crop_from_params(cx, cy, r, img_shape):
     """Return (crop_mask, bbox) for a circle, or (None, None) if invalid."""
     img_h, img_w = img_shape
@@ -430,7 +391,6 @@ def _merge_close_centers(centers, merge_threshold=0.2):
 def circularize_results(
     all_results,
     tracks=None,
-    smooth_alpha=0.35,
     radius_normalization=True,
     max_radius_clusters=2,
     radius_merge_threshold=0.2,
@@ -547,39 +507,38 @@ def circularize_results(
                 target_r = _snap_radius(target_r)
             track_target_radius[track_id] = float(target_r)
 
-    # Stabilize center/radius track-wise (OCR-style directional stabilization).
+    # Stabilize centers track-wise using centered median (no directional lag).
     stabilized_params = {}
     if tracks:
         for track_id, track in enumerate(tracks):
-            prev = None
             target_r = track_target_radius.get(track_id)
-            for list_idx, mask_idx in sorted(track, key=lambda p: (p[0], p[1])):
+
+            # Collect raw centers for all valid entries in frame order
+            sorted_entries = sorted(track, key=lambda p: (p[0], p[1]))
+            valid_entries = []
+            raw_cx_list = []
+            raw_cy_list = []
+            for list_idx, mask_idx in sorted_entries:
                 info = mask_info_cache.get((list_idx, mask_idx))
                 if info is None or info.get("params") is None:
                     continue
                 raw_cx, raw_cy, raw_r = info["params"]
-                candidate_r = float(target_r if target_r is not None else raw_r)
-                candidate = (float(raw_cx), float(raw_cy), candidate_r)
+                valid_entries.append((list_idx, mask_idx))
+                raw_cx_list.append(float(raw_cx))
+                raw_cy_list.append(float(raw_cy))
 
-                stable = _stabilize_circle_params(candidate, prev)
+            if not valid_entries:
+                continue
 
-                # Optional damping to reduce tiny jitter only.
-                # Do not low-pass real motion, otherwise masks visually "lag" behind
-                # moving profile pictures.
-                if prev is not None and smooth_alpha is not None:
-                    center_move = float(math.hypot(stable[0] - prev[0], stable[1] - prev[1]))
-                    # Only smooth sub-pixel / tiny center changes. For real movement,
-                    # keep the current stabilized center to avoid delay.
-                    if (not info.get("is_partial", False)) and center_move < 1.0:
-                        alpha = float(max(0.0, min(1.0, smooth_alpha)))
-                        stable = (
-                            alpha * stable[0] + (1.0 - alpha) * prev[0],
-                            alpha * stable[1] + (1.0 - alpha) * prev[1],
-                            alpha * stable[2] + (1.0 - alpha) * prev[2],
-                        )
+            # Centered median filter — symmetric window, zero lag
+            smooth_cx = centered_median_smooth(raw_cx_list, window=5)
+            smooth_cy = centered_median_smooth(raw_cy_list, window=5)
 
-                prev = stable
-                stabilized_params[(list_idx, mask_idx)] = stable
+            for i, (list_idx, mask_idx) in enumerate(valid_entries):
+                info = mask_info_cache.get((list_idx, mask_idx))
+                raw_r = float(info["params"][2])
+                r = float(target_r if target_r is not None else raw_r)
+                stabilized_params[(list_idx, mask_idx)] = (smooth_cx[i], smooth_cy[i], r)
 
     # Final pass: build circular results
     for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):
@@ -1348,7 +1307,7 @@ def process_video_sam3(frames_folder, output_folder,
             _ = pickle.load(f)
         print(f"Circular masks already exist at {circular_unified_path}, skipping")
     except FileNotFoundError:
-        circular_results = circularize_results(all_results, tracks=tracks, smooth_alpha=0.35)
+        circular_results = circularize_results(all_results, tracks=tracks)
         with open(circular_pickle_path, 'wb') as f:
             pickle.dump(circular_results, f)
         circular_unified = convert_results_to_unified_dict(circular_results, tracks)

@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from pathlib import Path
 
 from utils import extract_video_frames
-from utils import resolve_device
+from utils import resolve_device, centered_median_smooth
 
 def _bbox_to_int_tuple(bbox):
     """Normalize a bbox-like iterable to an integer (x1, y1, x2, y2) tuple."""
@@ -1040,97 +1040,6 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
             # Low text similarity - require tighter position match
             return x_distance < position_threshold * 0.5 and y_distance < position_threshold * 0.5 and size_diff < size_threshold * 0.8
     
-    
-    def stabilize_coordinates(current_bbox, prev_bbox, movement_threshold=3):
-        """
-        Stabilize coordinates based on movement direction.
-        
-        Args:
-            current_bbox (tuple): Current frame bounding box (x1, y1, x2, y2)
-            prev_bbox (tuple): Previous frame bounding box (x1, y1, x2, y2)
-            movement_threshold (int): Minimum movement to consider as actual movement
-            
-        Returns:
-            tuple: Stabilized bounding box coordinates
-        """
-        curr_x1, curr_y1, curr_x2, curr_y2 = current_bbox
-        prev_x1, prev_y1, prev_x2, prev_y2 = prev_bbox
-        
-        def union_bbox(a, b):
-            """Keep full coverage across minor OCR size fluctuations."""
-            return (
-                int(min(a[0], b[0])),
-                int(min(a[1], b[1])),
-                int(max(a[2], b[2])),
-                int(max(a[3], b[3])),
-            )
-        
-        # Calculate centers and movements
-        curr_center_x = (curr_x1 + curr_x2) / 2
-        curr_center_y = (curr_y1 + curr_y2) / 2
-        prev_center_x = (prev_x1 + prev_x2) / 2
-        prev_center_y = (prev_y1 + prev_y2) / 2
-        
-        x_movement = abs(curr_center_x - prev_center_x)
-        y_movement = abs(curr_center_y - prev_center_y)
-        
-        # Calculate current dimensions
-        curr_width = curr_x2 - curr_x1
-        curr_height = curr_y2 - curr_y1
-        prev_width = prev_x2 - prev_x1
-        prev_height = prev_y2 - prev_y1
-        
-        # Determine movement type and stabilize accordingly
-        if x_movement < movement_threshold and y_movement < movement_threshold:
-            # Static center with significant size shift often means OCR changed
-            # text extent. Keep the union to avoid shrinking true text coverage.
-            width_change = abs(curr_width - prev_width) / max(1, prev_width)
-            height_change = abs(curr_height - prev_height) / max(1, prev_height)
-            if max(width_change, height_change) > 0.15:
-                return union_bbox(current_bbox, prev_bbox)
-            return _bbox_to_int_tuple(prev_bbox)
-            
-        elif y_movement < movement_threshold or y_movement < x_movement / 2:
-            # Horizontal movement: preserve Y coordinates, use current X but maintain consistent width
-            stable_width = max(prev_width, curr_width)  # Prevent width collapse
-            stable_y1 = prev_y1
-            stable_y2 = prev_y2
-            
-            # Use current center X but with stable width
-            stable_x1 = int(round(curr_center_x - stable_width / 2))
-            stable_x2 = stable_x1 + int(stable_width)
-            
-            return (stable_x1, stable_y1, stable_x2, stable_y2)
-            
-        elif x_movement < movement_threshold or x_movement < y_movement / 2:
-            # Vertical movement: preserve X coordinates, use current Y but maintain consistent height
-            stable_height = max(prev_height, curr_height)  # Prevent height collapse
-            stable_x1 = prev_x1
-            stable_x2 = prev_x2
-            
-            # Use current center Y but with stable height
-            stable_y1 = int(round(curr_center_y - stable_height / 2))
-            stable_y2 = stable_y1 + int(stable_height)
-            
-            return (stable_x1, stable_y1, stable_x2, stable_y2)
-            
-        else:
-            # Diagonal movement: use current coordinates but try to maintain consistent dimensions
-            # Prefer previous dimensions if current ones are too different
-            width_diff = abs(curr_width - prev_width) / prev_width if prev_width > 0 else 0
-            height_diff = abs(curr_height - prev_height) / prev_height if prev_height > 0 else 0
-            
-            final_width = max(prev_width, curr_width) if width_diff > 0.2 else curr_width
-            final_height = max(prev_height, curr_height) if height_diff > 0.2 else curr_height
-            
-            # Center the box with stable dimensions
-            stable_x1 = int(round(curr_center_x - final_width / 2))
-            stable_y1 = int(round(curr_center_y - final_height / 2))
-            stable_x2 = stable_x1 + int(final_width)
-            stable_y2 = stable_y1 + int(final_height)
-            
-            return (stable_x1, stable_y1, stable_x2, stable_y2)
-
     if not frame_boxes:
         return frame_boxes
 
@@ -1197,7 +1106,7 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
         for _, box in unmatched_boxes:
             tracks.append([(frame_idx, box)])
     
-    # Apply stabilization to each track
+    # Apply centered median smoothing to each track (no directional lag).
     for track_id, track in enumerate(tracks):
         if len(track) < 2:
             # Single detection - keep as is
@@ -1209,7 +1118,7 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
             stabilized_boxes[frame_idx].append(stabilized_box)
             track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id
             continue
-        
+
         # Multi-frame track - find best text representation.
         # Primary criterion: longest text (most characters).  Partial / corrupted
         # OCR detections are shorter but can have *higher* confidence, so using
@@ -1223,29 +1132,46 @@ def enhanced_temporal_tracking(frame_boxes, max_gap=6, position_threshold=50, si
             text_variants,
             key=lambda x: (len(x[0]), len(x[0].split()), x[1]),
         )[0]
-        
-        # Multi-frame track - apply frame-to-frame stabilization
+
+        # Collect raw top-left corners and dimensions for the whole track.
+        # We smooth x1/y1 (not center) because the top-left corner of a text
+        # box is the most stable reference: OCR consistently finds where text
+        # starts, while the bottom/right edges jitter with character detection.
+        raw_x1 = []
+        raw_y1 = []
+        raw_w = []
+        raw_h = []
+        for _, box in track:
+            x1, y1, x2, y2 = box['bbox']
+            raw_x1.append(float(x1))
+            raw_y1.append(float(y1))
+            raw_w.append(float(x2 - x1))
+            raw_h.append(float(y2 - y1))
+
+        # Centered median filter on top-left corner — symmetric window, zero lag
+        smooth_x1 = centered_median_smooth(raw_x1, window=5)
+        smooth_y1 = centered_median_smooth(raw_y1, window=5)
+
+        # For width: use per-track max to prevent shrinking when OCR misses
+        # trailing characters (preserves intent of the old union-bbox logic)
+        stable_w = float(max(raw_w))
+        # For height: use per-track median (already normalized upstream)
+        stable_h = float(np.median(raw_h))
+
+        # Build stabilized boxes from smoothed top-left + stable dimensions
         for i, (frame_idx, box) in enumerate(track):
             box_idx_in_stabilized = len(stabilized_boxes[frame_idx])
-            
-            if i == 0:
-                # First frame in track - keep original coordinates
-                stabilized_box = box.copy()
-                stabilized_box['text'] = best_text  # Use consistent text
-                stabilized_box['track_id'] = track_id
-                stabilized_box['bbox'] = _bbox_to_int_tuple(stabilized_box['bbox'])
-            else:
-                # Stabilize based on previous frame
-                prev_frame, prev_box = track[i-1]
-                stabilized_prev_bbox = stabilized_boxes[prev_frame][-1]['bbox']  # Get the stabilized previous box
-                
-                stabilized_bbox = stabilize_coordinates(box['bbox'], stabilized_prev_bbox)
-                
-                stabilized_box = box.copy()
-                stabilized_box['bbox'] = stabilized_bbox
-                stabilized_box['text'] = best_text  # Use consistent text
-                stabilized_box['track_id'] = track_id  # Assign track_id directly to box
-            
+
+            x1 = int(round(smooth_x1[i]))
+            y1 = int(round(smooth_y1[i]))
+            x2 = x1 + int(round(stable_w))
+            y2 = y1 + int(round(stable_h))
+
+            stabilized_box = box.copy()
+            stabilized_box['bbox'] = (x1, y1, x2, y2)
+            stabilized_box['text'] = best_text
+            stabilized_box['track_id'] = track_id
+
             stabilized_boxes[frame_idx].append(stabilized_box)
             track_assignments[(frame_idx, box_idx_in_stabilized)] = track_id
     
