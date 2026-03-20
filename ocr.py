@@ -830,7 +830,7 @@ def filter_boxes_by_names(frame_boxes, names_dict, similarity_threshold=0.8):
             return ""
         text = unicodedata.normalize('NFD', text)
         text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
-        return text.lower().strip()
+        return text.lower().strip().strip('.,;:!?()\"\'-')
     
     def word_matches_name_part(word_text, name_part):
         """Check if word matches a part of a name"""
