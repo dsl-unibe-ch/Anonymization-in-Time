@@ -238,22 +238,19 @@ def process_video_ocr(video_path, output_dir, dict_path,
             pickle.dump(similarities, f)
         print(f"Saved raw detections to {boxes_pkl}")
 
-    # --- Step 3: load names dictionary ---
-    with open(dict_path, "r", encoding="utf-8") as f:
-        names_dict = json.load(f)
-
-    # --- Step 4: per-line height normalisation ---
+    # --- Step 3: per-line height normalisation ---
     frame_boxes = _normalize_heights(frame_boxes)
 
-    # --- Step 5: name matching ---
-    matched_boxes = filter_by_names(frame_boxes, names_dict)
+    # --- Step 4: tracking + height stabilization (on ALL boxes) ---
+    frame_boxes = stabilize(frame_boxes)
 
-    # --- Step 6: anchor-based stabilization + track ID assignment ---
-    stabilized_boxes = stabilize(matched_boxes, similarities,
-                                  change_threshold=change_threshold)
+    # --- Step 5: name matching (annotates all boxes, to_show=True/False) ---
+    with open(dict_path, "r", encoding="utf-8") as f:
+        names_dict = json.load(f)
+    annotated_boxes = filter_by_names(frame_boxes, names_dict)
 
     # --- Step 7: convert to unified output format ---
-    unified = to_unified(stabilized_boxes)
+    unified = to_unified(annotated_boxes)
 
     # --- Save ---
     with open(output_pkl, "wb") as f:

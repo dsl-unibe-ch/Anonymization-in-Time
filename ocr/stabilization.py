@@ -5,13 +5,16 @@ The raw docTR detections are already spatially stable — boxes track text
 positions well frame-to-frame.  Per-line height normalization in the pipeline
 handles within-frame height consistency.
 
-This module only assigns track IDs so downstream consumers (SAM3, format.py)
-can identify the same word across frames.  No coordinate smoothing is applied
-— that was causing lag during scrolling.
+This module assigns track IDs and then locks each track to a fixed
+**height** (median of y2-y1 across all frames).  The y-center from the
+raw detection is preserved — only the extent above/below center is
+standardized.  This eliminates height flicker without introducing any
+positional lag.
 """
 
 from __future__ import annotations
 
+import numpy as np
 from collections import defaultdict
 
 from .name_matching import normalize
@@ -21,13 +24,17 @@ from .name_matching import normalize
 # Track assignment (greedy nearest-neighbour matching)
 # ---------------------------------------------------------------------------
 
-def _assign_tracks(frame_boxes: dict) -> dict:
+def _assign_tracks(frame_boxes: dict, max_dist: int = 80) -> dict:
     """
     Assign integer track IDs to boxes across frames.
 
     Two boxes in consecutive frames get the same track_id if:
-      - Their normalized text matches exactly
-      - Their x-center is within 50px
+      - Their normalized name/text matches exactly
+      - They are the closest pair (by Euclidean center distance) among
+        all candidates with the same text, within max_dist pixels
+
+    Uses distance-based matching to handle duplicate names correctly
+    (e.g. three "Arch" boxes at different positions).
 
     Returns:
         {frame_idx: [box_dict with track_id, ...]}
@@ -37,38 +44,123 @@ def _assign_tracks(frame_boxes: dict) -> dict:
         return {}
 
     next_track_id = 0
-    active_tracks: dict[tuple, int] = {}
+    # active_tracks: {norm_text: [(x_center, y_center, track_id), ...]}
+    active_tracks: dict[str, list] = defaultdict(list)
     out: dict = {}
 
     for fi in sorted_frames:
         boxes = frame_boxes[fi]
-        new_active: dict[tuple, int] = {}
+        new_active: dict[str, list] = defaultdict(list)
         frame_out = []
 
+        # Build list of (box, text, center) for this frame
+        current = []
         for box in boxes:
-            text = normalize(box.get("text", ""))
+            text = normalize(box.get("name", box.get("text", "")))
             x1, y1, x2, y2 = box["bbox"]
-            x_center = (x1 + x2) // 2
-            x_bucket = x_center // 50
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+            current.append((box, text, cx, cy))
 
-            # Try same or adjacent x bucket
-            matched_tid = None
-            for dx in (0, -1, 1):
-                key = (text, x_bucket + dx)
-                if key in active_tracks:
-                    matched_tid = active_tracks.pop(key)
+        # For each unique text, match current boxes to active tracks
+        # by closest distance (Hungarian-lite: greedy closest-first)
+        texts_in_frame = set(t for _, t, _, _ in current)
+        text_assignments: dict[int, int] = {}  # box index -> track_id
+
+        for text in texts_in_frame:
+            prev_entries = active_tracks.get(text, [])
+            curr_indices = [i for i, (_, t, _, _) in enumerate(current) if t == text]
+
+            if not prev_entries:
+                # All new tracks
+                for i in curr_indices:
+                    text_assignments[i] = next_track_id
+                    next_track_id += 1
+                continue
+
+            # Build distance pairs and sort by distance
+            pairs = []
+            for ci in curr_indices:
+                _, _, cx, cy = current[ci]
+                for pi, (px, py, ptid) in enumerate(prev_entries):
+                    dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+                    pairs.append((dist, ci, pi, ptid))
+            pairs.sort()
+
+            used_curr = set()
+            used_prev = set()
+            for dist, ci, pi, ptid in pairs:
+                if ci in used_curr or pi in used_prev:
+                    continue
+                if dist > max_dist:
                     break
+                text_assignments[ci] = ptid
+                used_curr.add(ci)
+                used_prev.add(pi)
 
-            if matched_tid is None:
-                matched_tid = next_track_id
-                next_track_id += 1
+            # Unmatched current boxes get new tracks
+            for ci in curr_indices:
+                if ci not in text_assignments:
+                    text_assignments[ci] = next_track_id
+                    next_track_id += 1
 
-            frame_out.append({**box, "track_id": matched_tid})
-            new_active[(text, x_bucket)] = matched_tid
+        # Build output and new_active
+        for i, (box, text, cx, cy) in enumerate(current):
+            tid = text_assignments[i]
+            frame_out.append({**box, "track_id": tid})
+            new_active[text].append((cx, cy, tid))
 
         out[fi] = frame_out
         active_tracks = new_active
 
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Fix height per track (preserve y-center, lock height)
+# ---------------------------------------------------------------------------
+
+def _fix_track_heights(frame_boxes: dict) -> dict:
+    """
+    For each track_id, compute the median box height (y2-y1) across all
+    frames.  Then re-apply that fixed height to every occurrence, keeping
+    the original y-center so the box doesn't shift vertically.
+    """
+    # Collect heights per track
+    track_heights: dict[int, list] = defaultdict(list)
+    for fi, boxes in frame_boxes.items():
+        for box in boxes:
+            tid = box.get("track_id")
+            if tid is None:
+                continue
+            _, y1, _, y2 = box["bbox"]
+            track_heights[tid].append(y2 - y1)
+
+    # Median height per track
+    track_med_h: dict[int, int] = {}
+    for tid, heights in track_heights.items():
+        track_med_h[tid] = int(np.median(heights))
+
+    # Apply: keep y-center, set fixed height
+    out = {}
+    for fi, boxes in frame_boxes.items():
+        frame_out = []
+        for box in boxes:
+            tid = box.get("track_id")
+            if tid is not None and tid in track_med_h:
+                x1, y1, x2, y2 = box["bbox"]
+                y_center = (y1 + y2) / 2
+                half_h = track_med_h[tid] / 2
+                new_y1 = int(y_center - half_h)
+                new_y2 = int(y_center + half_h)
+                new_box = {**box, "bbox": (x1, new_y1, x2, new_y2)}
+                if box.get("parent_box"):
+                    px1, _, px2, _ = box["parent_box"]
+                    new_box["parent_box"] = (px1, new_y1, px2, new_y2)
+                frame_out.append(new_box)
+            else:
+                frame_out.append({**box})
+        out[fi] = frame_out
     return out
 
 
@@ -80,7 +172,7 @@ def stabilize(frame_boxes: dict, similarities: dict = None,
               change_threshold: float = 0.999,
               smooth_window: int = 5) -> dict:
     """
-    Assign track IDs to boxes across frames. No coordinate smoothing.
+    Assign track IDs and lock each track to a fixed height.
 
     Args:
         frame_boxes:      {frame_idx: [box_dict, ...]}
@@ -89,9 +181,10 @@ def stabilize(frame_boxes: dict, similarities: dict = None,
         smooth_window:    (unused, kept for API compat)
 
     Returns:
-        {frame_idx: [box_dict with track_id, ...]}
+        {frame_idx: [box_dict with track_id and fixed height, ...]}
     """
     if not frame_boxes:
         return frame_boxes
 
-    return _assign_tracks(frame_boxes)
+    tracked = _assign_tracks(frame_boxes)
+    return _fix_track_heights(tracked)

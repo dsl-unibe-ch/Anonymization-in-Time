@@ -303,24 +303,20 @@ def _find_matches_in_line(line: list, name_index: dict) -> list:
 
 def filter_by_names(frame_boxes: dict, names_dict: dict) -> dict:
     """
-    Match word-level boxes against names_dict and return filtered boxes.
+    Match word-level boxes against names_dict.
 
-    Each returned box has:
-        bbox, text, confidence, line_idx   (from upstream)
-        name:      matched dictionary name
-        alterego:  replacement name
-        parent_box: line bounding hull
-        to_show:   True (all returned boxes are matches)
-        track_id:  None (assigned later in stabilization)
+    Returns ALL boxes:
+      - Matched boxes get: name, alterego, to_show=True
+      - Unmatched boxes get: to_show=False
 
-    Boxes that do not match any name are dropped.
+    Existing fields (track_id, bbox, parent_box, etc.) are preserved.
 
     Args:
         frame_boxes: {frame_idx: [word_box, ...]}
         names_dict:  {"Full Name": "Alterego"} dictionary
 
     Returns:
-        {frame_idx: [matched_box, ...]}
+        {frame_idx: [box, ...]}  — all boxes, matched and unmatched
     """
     name_index = build_name_index(names_dict)
     result = {}
@@ -331,35 +327,40 @@ def filter_by_names(frame_boxes: dict, names_dict: dict) -> dict:
             continue
 
         lines = _group_into_lines(boxes)
-        # Precompute parent_box per line_idx
-        line_parent = {}
-        for line in lines:
-            if not line:
-                continue
-            line_boxes_only = [b for _, b in line]
-            pb = _compute_parent_box(line_boxes_only)
-            for _, b in line:
-                line_parent[id(b)] = pb
 
-        frame_matches = []
+        # Collect which original box indices are consumed by matches
+        matched_indices: set = set()
+        match_info: dict = {}  # orig_idx -> {name, alterego, confidence}
+
         for line in lines:
             matches = _find_matches_in_line(line, name_index)
             for m in matches:
-                # parent_box from the matched words' line
-                matched_line_boxes = [b for _, b in line if _ in m["box_indices"]]
-                pb = _compute_parent_box(matched_line_boxes) if matched_line_boxes else m["bbox"]
+                for idx in m["box_indices"]:
+                    matched_indices.add(idx)
+                    match_info[idx] = {
+                        "name": m["name"],
+                        "alterego": m["alterego"],
+                        "confidence": m["confidence"],
+                    }
 
-                frame_matches.append({
-                    "bbox": m["bbox"],
-                    "parent_box": pb,
-                    "text": m["text"],
-                    "name": m["name"],
-                    "alterego": m["alterego"],
-                    "confidence": m["confidence"],
+        # Build output: annotate every box
+        frame_out = []
+        for i, box in enumerate(boxes):
+            if i in matched_indices:
+                info = match_info[i]
+                frame_out.append({
+                    **box,
+                    "name": info["name"],
+                    "alterego": info["alterego"],
+                    "confidence": info["confidence"],
                     "to_show": True,
-                    "track_id": None,
+                })
+            else:
+                frame_out.append({
+                    **box,
+                    "to_show": False,
                 })
 
-        result[frame_idx] = frame_matches
+        result[frame_idx] = frame_out
 
     return result
