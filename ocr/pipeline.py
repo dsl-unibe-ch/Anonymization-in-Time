@@ -170,25 +170,36 @@ def _normalize_heights(frame_boxes: dict, y_merge_threshold: int = 10) -> dict:
             lid = box.get("line_idx", -1)
             line_map.setdefault(lid, []).append(i)
 
-        # Step 2: merge groups whose y-centers are close
-        # (handles EasyOCR splitting one visual line into multiple detections)
+        # Step 2: merge groups whose y-centers AND x-spans are close
+        # (handles EasyOCR splitting one visual line into multiple detections,
+        #  but keeps distant elements like tab labels separate)
         merged_groups = []
         for indices in line_map.values():
             y_centers = [(boxes[i]["bbox"][1] + boxes[i]["bbox"][3]) / 2 for i in indices]
             group_yc = np.mean(y_centers)
+            group_x1 = min(boxes[i]["bbox"][0] for i in indices)
+            group_x2 = max(boxes[i]["bbox"][2] for i in indices)
+            avg_h = np.mean([boxes[i]["bbox"][3] - boxes[i]["bbox"][1] for i in indices])
+            x_gap_threshold = max(avg_h * 3, 60)  # ~3 char widths
 
             # Try to merge with an existing group
             merged = False
             for mg in merged_groups:
-                if abs(mg["yc"] - group_yc) <= y_merge_threshold:
-                    mg["indices"].extend(indices)
-                    # Update running y-center
-                    all_yc = [(boxes[i]["bbox"][1] + boxes[i]["bbox"][3]) / 2 for i in mg["indices"]]
-                    mg["yc"] = np.mean(all_yc)
-                    merged = True
-                    break
+                if abs(mg["yc"] - group_yc) > y_merge_threshold:
+                    continue
+                # Check horizontal proximity: gap between x-spans
+                x_gap = max(0, group_x1 - mg["x2"], mg["x1"] - group_x2)
+                if x_gap > x_gap_threshold:
+                    continue
+                mg["indices"].extend(indices)
+                all_yc = [(boxes[i]["bbox"][1] + boxes[i]["bbox"][3]) / 2 for i in mg["indices"]]
+                mg["yc"] = np.mean(all_yc)
+                mg["x1"] = min(mg["x1"], group_x1)
+                mg["x2"] = max(mg["x2"], group_x2)
+                merged = True
+                break
             if not merged:
-                merged_groups.append({"yc": group_yc, "indices": indices})
+                merged_groups.append({"yc": group_yc, "x1": group_x1, "x2": group_x2, "indices": indices})
 
         # Step 3: normalize y1/y2 and compute parent_box per merged group
         adjusted = [b.copy() for b in boxes]
@@ -210,6 +221,21 @@ def _normalize_heights(frame_boxes: dict, y_merge_threshold: int = 10) -> dict:
                     "bbox": (x1, med_y1, x2, med_y2),
                     "parent_box": parent_box,
                 }
+
+            # Step 4: close gaps between adjacent words on the same line
+            # (groups are already x-proximity checked, so all gaps here are valid)
+            sorted_line = sorted(indices, key=lambda i: adjusted[i]["bbox"][0])
+            for j in range(len(sorted_line) - 1):
+                li = sorted_line[j]
+                ri = sorted_line[j + 1]
+                lx2 = adjusted[li]["bbox"][2]
+                rx1 = adjusted[ri]["bbox"][0]
+                if rx1 > lx2:
+                    mid = (lx2 + rx1) // 2
+                    lbox = adjusted[li]["bbox"]
+                    rbox = adjusted[ri]["bbox"]
+                    adjusted[li] = {**adjusted[li], "bbox": (lbox[0], lbox[1], mid, lbox[3])}
+                    adjusted[ri] = {**adjusted[ri], "bbox": (mid, rbox[1], rbox[2], rbox[3])}
 
         out[frame_idx] = adjusted
     return out
