@@ -247,12 +247,10 @@ def _normalize_heights(frame_boxes: dict, y_merge_threshold: int = 10) -> dict:
 
 def process_video_ocr(video_path, output_dir, dict_path,
                        languages=None,
-                       num_workers=4,             # kept for API compat
                        extract_frames=True,
                        frame_step=1,
                        ocr_engine="doctr",
-                       change_detection=True,
-                       change_threshold=0.999):
+                       **kwargs):
     """
     Process a single video for OCR detection.
 
@@ -264,8 +262,6 @@ def process_video_ocr(video_path, output_dir, dict_path,
         extract_frames:   Whether to extract frames (set False to reuse existing).
         frame_step:       Extract every N-th frame.
         ocr_engine:       "doctr" (default) or "easyocr".
-        change_detection: Skip OCR on visually unchanged frames (default True).
-        change_threshold: Similarity threshold for skipping. Default 0.999.
 
     Returns:
         dict: Unified OCR data {frame_idx: [box, ...]}.
@@ -283,7 +279,6 @@ def process_video_ocr(video_path, output_dir, dict_path,
     print(f"Processing: {video_path}")
     print(f"Output:     {output_dir}")
     print(f"Engine:     {engine}")
-    print(f"Change det: {'ON' if change_detection else 'OFF'} (threshold={change_threshold})")
     print(f"{'=' * 60}\n")
 
     # --- Step 1: extract frames ---
@@ -301,10 +296,8 @@ def process_video_ocr(video_path, output_dir, dict_path,
             similarities = pickle.load(f)
         print(f"Loaded existing detections from {boxes_pkl}")
     else:
-        eff_threshold = change_threshold if change_detection else 0.0
         frame_boxes, similarities = _run_ocr_on_frames(
             frames_dir,
-            change_threshold=eff_threshold,
             ocr_engine=engine,
             languages=languages,
         )

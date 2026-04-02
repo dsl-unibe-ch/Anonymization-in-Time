@@ -83,15 +83,14 @@ def reset_cuda_on_error(device: str | None = None):
         print(f"Warning: GPU reset failed: {e}")
 
 
-def process_single_video(video_path, output_base_dir, dict_path, 
+def process_single_video(video_path, output_base_dir, dict_path,
                         ocr_languages=["en", "de"], ocr_workers=4,
                         sam3_prompt="profile image, profile picture", sam3_batch_size=2,
-                        sam3_device='auto', frame_step=1, ocr_engine="easyocr",
-                        extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True,
-                        ocr_change_detection=True, ocr_change_threshold=0.985):
+                        sam3_device='auto', frame_step=1, ocr_engine="doctr",
+                        extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
     """
     Process a single video through the complete pipeline.
-    
+
     Args:
         video_path (str or Path): Path to the video file
         output_base_dir (str or Path): Base directory for all outputs
@@ -102,14 +101,12 @@ def process_single_video(video_path, output_base_dir, dict_path,
         sam3_batch_size (int): Batch size for SAM3 inference
         sam3_device (str): Device for SAM3 ('auto', 'cuda', 'mps', or 'cpu')
         frame_step (int): Step between frames to extract
-        ocr_engine (str): OCR backend ('easyocr' or 'paddleocr')
+        ocr_engine (str): OCR backend ('doctr' or 'easyocr')
         extract_frames (bool): Whether to extract frames from video
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
-        ocr_change_detection (bool): Skip OCR for visually unchanged frames (default: True)
-        ocr_change_threshold (float): Similarity threshold for change detection (default: 0.985)
-        
+
     Returns:
         dict: Results containing paths to all generated files
     """
@@ -168,12 +165,9 @@ def process_single_video(video_path, output_base_dir, dict_path,
                 output_dir=video_output_dir,
                 dict_path=dict_path,
                 languages=ocr_languages,
-                num_workers=ocr_workers,
                 extract_frames=False,  # Already extracted
                 frame_step=frame_step,
                 ocr_engine=ocr_engine,
-                change_detection=ocr_change_detection,
-                change_threshold=ocr_change_threshold
             )
             raw_ocr_boxes = video_output_dir / f"boxes_{ocr_engine}.pkl"
             if raw_ocr_boxes.exists():
@@ -272,9 +266,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
 def process_multiple_videos(video_paths, output_base_dir, dict_path,
                            ocr_languages=["en", "de"], ocr_workers=4,
                            sam3_prompt="profile image, profile picture", sam3_batch_size=2,
-                           sam3_device='auto', frame_step=1, ocr_engine="easyocr",
-                           extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True,
-                           ocr_change_detection=True, ocr_change_threshold=0.985):
+                           sam3_device='auto', frame_step=1, ocr_engine="doctr",
+                           extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
     """
     Process multiple videos through the complete pipeline.
     
@@ -288,14 +281,11 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
         sam3_batch_size (int): Batch size for SAM3 inference
         sam3_device (str): Device for SAM3 ('auto', 'cuda', 'mps', or 'cpu')
         frame_step (int): Step between frames to extract
-        ocr_engine (str): OCR backend ('easyocr' or 'paddleocr')
+        ocr_engine (str): OCR backend ('doctr' or 'easyocr')
         extract_frames (bool): Whether to extract frames from videos
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
-        ocr_change_detection (bool): Skip OCR for visually unchanged frames (default: True)
-        ocr_change_threshold (float): Similarity threshold for change detection (default: 0.985)
-        
     Returns:
         list: List of result dictionaries for each video
     """
@@ -332,8 +322,6 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                 run_ocr=run_ocr,
                 run_sam3=run_sam3,
                 run_transitions=run_transitions,
-                ocr_change_detection=ocr_change_detection,
-                ocr_change_threshold=ocr_change_threshold
             )
             all_results.append(result)
         except Exception as e:
@@ -390,8 +378,8 @@ def main():
                        help='Languages for OCR (default: en de)')
     parser.add_argument('--ocr_workers', type=int, default=4,
                        help='Number of parallel workers for OCR (default: 4)')
-    parser.add_argument('--ocr_engine', type=str, default='easyocr', choices=['easyocr', 'paddleocr'],
-                       help='OCR backend to use (default: easyocr)')
+    parser.add_argument('--ocr_engine', type=str, default='doctr', choices=['doctr', 'easyocr'],
+                       help='OCR backend to use (default: doctr)')
     
     # SAM3 options
     parser.add_argument('--sam3_prompt', type=str, default="profile image, profile picture",
@@ -400,13 +388,6 @@ def main():
                        help='Batch size for SAM3 inference (default: 2)')
     parser.add_argument('--sam3_device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'],
                        help='Device for SAM3 (default: auto)')
-    
-    # OCR speed options
-    parser.add_argument('--no_ocr_change_detection', action='store_true',
-                       help='Disable frame change detection for OCR (slower but processes every frame)')
-    parser.add_argument('--ocr_change_threshold', type=float, default=0.985,
-                       help='Similarity threshold for OCR frame change detection (default: 0.985). '
-                            'Higher = more aggressive skipping. Range [0, 1].')
     
     args = parser.parse_args()
     
@@ -459,8 +440,6 @@ def main():
             run_ocr=not args.skip_ocr,
             run_sam3=not args.skip_sam3,
             run_transitions=not args.skip_transitions,
-            ocr_change_detection=not args.no_ocr_change_detection,
-            ocr_change_threshold=args.ocr_change_threshold
         )
     else:
         process_multiple_videos(
@@ -478,8 +457,6 @@ def main():
             run_ocr=not args.skip_ocr,
             run_sam3=not args.skip_sam3,
             run_transitions=not args.skip_transitions,
-            ocr_change_detection=not args.no_ocr_change_detection,
-            ocr_change_threshold=args.ocr_change_threshold
         )
 
 

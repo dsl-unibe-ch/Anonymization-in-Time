@@ -100,17 +100,28 @@ class VideoProcessorGUI:
         ttk.Entry(params_frame, textvariable=self.frame_step_var, width=10).grid(
             row=0, column=1, sticky=tk.W, padx=(10, 20), pady=2)
         
-        # OCR languages
-        ttk.Label(params_frame, text="OCR Languages:").grid(row=0, column=2, sticky=tk.W, pady=2)
-        self.ocr_langs_var = tk.StringVar(value="en de")
-        ttk.Entry(params_frame, textvariable=self.ocr_langs_var, width=20).grid(
-            row=0, column=3, sticky=tk.W, padx=(10, 0), pady=2)
-
-        # OCR backend (fixed to EasyOCR)
-        ttk.Label(params_frame, text="OCR Engine:").grid(row=1, column=2, sticky=tk.W, pady=2)
-        ttk.Label(params_frame, text="EasyOCR").grid(
-            row=1, column=3, sticky=tk.W, padx=(10, 0), pady=2
+        # OCR backend
+        ttk.Label(params_frame, text="OCR Engine:").grid(row=0, column=2, sticky=tk.W, pady=2)
+        self.ocr_engine_var = tk.StringVar(value="doctr")
+        ocr_engine_combo = ttk.Combobox(
+            params_frame,
+            textvariable=self.ocr_engine_var,
+            values=["doctr", "easyocr"],
+            state="readonly",
+            width=10
         )
+        ocr_engine_combo.grid(row=0, column=3, sticky=tk.W, padx=(10, 0), pady=2)
+        ocr_engine_combo.bind("<<ComboboxSelected>>", self._on_ocr_engine_changed)
+
+        # OCR languages (only relevant for EasyOCR)
+        self.ocr_langs_label = ttk.Label(params_frame, text="OCR Languages:")
+        self.ocr_langs_label.grid(row=1, column=2, sticky=tk.W, pady=2)
+        self.ocr_langs_var = tk.StringVar(value="en de")
+        self.ocr_langs_entry = ttk.Entry(params_frame, textvariable=self.ocr_langs_var, width=20)
+        self.ocr_langs_entry.grid(row=1, column=3, sticky=tk.W, padx=(10, 0), pady=2)
+        # Disable by default since doctr is selected
+        self.ocr_langs_label.config(foreground="gray")
+        self.ocr_langs_entry.config(state=tk.DISABLED)
         
         # SAM3 device
         ttk.Label(params_frame, text="SAM3 Device:").grid(row=1, column=0, sticky=tk.W, pady=2)
@@ -150,9 +161,6 @@ class VideoProcessorGUI:
         ttk.Checkbutton(options_frame, text="Skip transitions", 
                        variable=self.skip_transitions_var).pack(side=tk.LEFT, padx=(0, 15))
         
-        self.ocr_change_detect_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="OCR change detection (faster)", 
-                       variable=self.ocr_change_detect_var).pack(side=tk.LEFT)
         
         # === CONTROL SECTION ===
         control_frame = ttk.Frame(main_frame)
@@ -258,6 +266,15 @@ class VideoProcessorGUI:
                 foreground="black"
             )
     
+    def _on_ocr_engine_changed(self, event=None):
+        """Enable/disable OCR languages field based on engine selection."""
+        if self.ocr_engine_var.get() == "easyocr":
+            self.ocr_langs_entry.config(state=tk.NORMAL)
+            self.ocr_langs_label.config(foreground="black")
+        else:
+            self.ocr_langs_entry.config(state=tk.DISABLED)
+            self.ocr_langs_label.config(foreground="gray")
+
     def _check_ready(self):
         """Check if all requirements are met to enable start button"""
         if self.video_paths and self.output_dir and self.dict_path and not self.processing:
@@ -285,22 +302,20 @@ class VideoProcessorGUI:
             return
         
         ocr_languages = self.ocr_langs_var.get().split()
-        ocr_engine = "easyocr"
+        ocr_engine = self.ocr_engine_var.get()
         sam3_prompt = self.sam3_prompt_var.get()
         sam3_device = self.sam3_device_var.get()
-        ocr_change_detection = self.ocr_change_detect_var.get()
         
         # Start processing in background thread
         thread = threading.Thread(
             target=self._processing_thread,
-            args=(frame_step, ocr_languages, ocr_engine, sam3_prompt, sam3_device,
-                  ocr_change_detection),
+            args=(frame_step, ocr_languages, ocr_engine, sam3_prompt, sam3_device),
             daemon=True
         )
         thread.start()
-    
+
     def _processing_thread(self, frame_step, ocr_languages, ocr_engine,
-                          sam3_prompt, sam3_device, ocr_change_detection=True):
+                          sam3_prompt, sam3_device):
         """Background thread for processing videos"""
         # Redirect stdout to log
         import io
@@ -335,7 +350,6 @@ class VideoProcessorGUI:
                     run_ocr=not self.skip_ocr_var.get(),
                     run_sam3=not self.skip_sam3_var.get(),
                     run_transitions=not self.skip_transitions_var.get(),
-                    ocr_change_detection=ocr_change_detection
                 )
             else:
                 process_multiple_videos(
@@ -351,7 +365,6 @@ class VideoProcessorGUI:
                     run_ocr=not self.skip_ocr_var.get(),
                     run_sam3=not self.skip_sam3_var.get(),
                     run_transitions=not self.skip_transitions_var.get(),
-                    ocr_change_detection=ocr_change_detection
                 )
             
             self.log_queue.put("\n✓ Processing complete!")
