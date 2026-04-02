@@ -1,7 +1,7 @@
 """
-OCR package — docTR-based pipeline for video name detection.
+OCR package — video name detection with docTR or EasyOCR.
 
-Public API (matches the old ocr.py interface used by process_videos.py):
+Public API:
     from ocr import process_video_ocr, process_videos_batch
 """
 

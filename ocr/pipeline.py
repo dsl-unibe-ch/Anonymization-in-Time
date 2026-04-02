@@ -20,7 +20,9 @@ import cv2
 from pathlib import Path
 from tqdm import tqdm
 
-from .engine import get_predictor, extract_words, cleanup as cleanup_engine
+from .engine import (get_predictor, extract_words,
+                     get_easyocr_reader, extract_words_easyocr,
+                     cleanup as cleanup_engine)
 from .name_matching import filter_by_names
 from .stabilization import stabilize
 from .format import to_unified
@@ -50,9 +52,15 @@ def _run_ocr_on_frames(frames_dir: Path,
                         change_threshold: float = 0.999,
                         max_consecutive_skips: int = 30,
                         min_confidence: float = 0.4,
-                        min_area: int = 100) -> tuple:
+                        min_area: int = 100,
+                        ocr_engine: str = "doctr",
+                        languages: list = None) -> tuple:
     """
-    Run docTR on every frame in frames_dir, skipping visually unchanged frames.
+    Run OCR on every frame in frames_dir, skipping visually unchanged frames.
+
+    Args:
+        ocr_engine: "doctr" or "easyocr"
+        languages:  Language list for EasyOCR (ignored by docTR)
 
     Returns:
         frame_boxes   {frame_idx: [word_box, ...]}
@@ -66,18 +74,32 @@ def _run_ocr_on_frames(frames_dir: Path,
     if not frame_paths:
         raise ValueError(f"No frames found in {frames_dir}")
 
+    engine = (ocr_engine or "doctr").lower().strip()
     print(f"Found {len(frame_paths)} frames in {frames_dir}")
-    predictor = get_predictor()
+
+    # Init the right engine
+    if engine == "easyocr":
+        reader = get_easyocr_reader(languages)
+        def _extract(frame):
+            return extract_words_easyocr(frame, reader=reader,
+                                         min_confidence=min_confidence,
+                                         min_area=min_area)
+    else:
+        predictor = get_predictor()
+        def _extract(frame):
+            return extract_words(frame, predictor=predictor,
+                                 min_confidence=min_confidence,
+                                 min_area=min_area)
 
     frame_boxes: dict = {}
     similarities: dict = {}
-    prev_frame = None             # previous frame (for consecutive comparison)
+    prev_frame = None
     prev_detections: list = []
     skipped = 0
     processed = 0
     consecutive_skips = 0
 
-    for frame_path in tqdm(frame_paths, desc="OCR (docTR + change detection)"):
+    for frame_path in tqdm(frame_paths, desc=f"OCR ({engine} + change detection)"):
         frame = cv2.imread(str(frame_path))
         if frame is None:
             print(f"Warning: could not read {frame_path}")
@@ -87,8 +109,6 @@ def _run_ocr_on_frames(frames_dir: Path,
         frame_idx = int("".join(filter(str.isdigit, stem)))
 
         if prev_frame is not None:
-            # Compare consecutive frames — only skip if they are
-            # virtually identical (threshold 0.999 by default).
             sim = _compute_frame_similarity(prev_frame, frame)
             similarities[frame_idx] = sim
 
@@ -103,9 +123,7 @@ def _run_ocr_on_frames(frames_dir: Path,
         else:
             similarities[frame_idx] = 0.0
 
-        detections = extract_words(frame, predictor=predictor,
-                                   min_confidence=min_confidence,
-                                   min_area=min_area)
+        detections = _extract(frame)
         frame_boxes[frame_idx] = detections
         prev_frame = frame
         prev_detections = detections
@@ -126,13 +144,19 @@ def _run_ocr_on_frames(frames_dir: Path,
 # Per-line height normalisation  (replaces K-means, uses docTR line_idx)
 # ---------------------------------------------------------------------------
 
-def _normalize_heights(frame_boxes: dict) -> dict:
+def _normalize_heights(frame_boxes: dict, y_merge_threshold: int = 10) -> dict:
     """
-    Align all words on the same docTR line to the median y1/y2 of that line,
-    and attach a ``parent_box`` (the bounding hull of the whole line) to every
-    word box.
+    Align all words on the same visual line to a consistent y1/y2,
+    and attach a ``parent_box`` (bounding hull of the whole line).
 
-    This runs per-frame since lines are independent in each frame.
+    Works for both engines:
+      - docTR:   words already grouped by line_idx
+      - EasyOCR: fragmented detections may have different line_idx for the
+                 same visual line; a y-center merge pass collapses them.
+
+    Args:
+        y_merge_threshold: max pixel distance between y-centers to merge
+                           two line_idx groups into one visual line.
     """
     out = {}
     for frame_idx, boxes in frame_boxes.items():
@@ -140,20 +164,41 @@ def _normalize_heights(frame_boxes: dict) -> dict:
             out[frame_idx] = []
             continue
 
-        # Group by line_idx (fall back to y-center clustering if missing)
+        # Step 1: group by line_idx
         line_map: dict = {}
         for i, box in enumerate(boxes):
             lid = box.get("line_idx", -1)
             line_map.setdefault(lid, []).append(i)
 
-        adjusted = [b.copy() for b in boxes]
+        # Step 2: merge groups whose y-centers are close
+        # (handles EasyOCR splitting one visual line into multiple detections)
+        merged_groups = []
         for indices in line_map.values():
+            y_centers = [(boxes[i]["bbox"][1] + boxes[i]["bbox"][3]) / 2 for i in indices]
+            group_yc = np.mean(y_centers)
+
+            # Try to merge with an existing group
+            merged = False
+            for mg in merged_groups:
+                if abs(mg["yc"] - group_yc) <= y_merge_threshold:
+                    mg["indices"].extend(indices)
+                    # Update running y-center
+                    all_yc = [(boxes[i]["bbox"][1] + boxes[i]["bbox"][3]) / 2 for i in mg["indices"]]
+                    mg["yc"] = np.mean(all_yc)
+                    merged = True
+                    break
+            if not merged:
+                merged_groups.append({"yc": group_yc, "indices": indices})
+
+        # Step 3: normalize y1/y2 and compute parent_box per merged group
+        adjusted = [b.copy() for b in boxes]
+        for mg in merged_groups:
+            indices = mg["indices"]
             y1_vals = [boxes[i]["bbox"][1] for i in indices]
             y2_vals = [boxes[i]["bbox"][3] for i in indices]
             med_y1 = int(np.median(y1_vals))
             med_y2 = int(np.median(y2_vals))
 
-            # Compute parent_box = bounding hull of the full line
             line_x1 = min(boxes[i]["bbox"][0] for i in indices)
             line_x2 = max(boxes[i]["bbox"][2] for i in indices)
             parent_box = (line_x1, med_y1, line_x2, med_y2)
@@ -175,11 +220,11 @@ def _normalize_heights(frame_boxes: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def process_video_ocr(video_path, output_dir, dict_path,
-                       languages=None,           # kept for API compat, unused by docTR
+                       languages=None,
                        num_workers=4,             # kept for API compat
                        extract_frames=True,
                        frame_step=1,
-                       ocr_engine="doctr",        # legacy param, always uses docTR now
+                       ocr_engine="doctr",
                        change_detection=True,
                        change_threshold=0.999):
     """
@@ -187,28 +232,31 @@ def process_video_ocr(video_path, output_dir, dict_path,
 
     Args:
         video_path:       Path to the video file.
-        output_dir:       Directory for outputs (frames/, ocr.pkl, boxes_doctr.pkl).
+        output_dir:       Directory for outputs (frames/, ocr.pkl, boxes_<engine>.pkl).
         dict_path:        Path to JSON with names {"Full Name": "Alterego"}.
+        languages:        Language list for EasyOCR (ignored by docTR).
         extract_frames:   Whether to extract frames (set False to reuse existing).
         frame_step:       Extract every N-th frame.
+        ocr_engine:       "doctr" (default) or "easyocr".
         change_detection: Skip OCR on visually unchanged frames (default True).
         change_threshold: Similarity threshold for skipping. Default 0.999.
 
     Returns:
         dict: Unified OCR data {frame_idx: [box, ...]}.
     """
+    engine = (ocr_engine or "doctr").lower().strip()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    boxes_pkl = output_dir / "boxes_doctr.pkl"
-    sims_pkl = output_dir / "similarities_doctr.pkl"
+    boxes_pkl = output_dir / f"boxes_{engine}.pkl"
+    sims_pkl = output_dir / f"similarities_{engine}.pkl"
     frames_dir = output_dir / "frames"
     output_pkl = output_dir / "ocr.pkl"
 
     print(f"\n{'=' * 60}")
     print(f"Processing: {video_path}")
     print(f"Output:     {output_dir}")
-    print(f"Engine:     docTR")
+    print(f"Engine:     {engine}")
     print(f"Change det: {'ON' if change_detection else 'OFF'} (threshold={change_threshold})")
     print(f"{'=' * 60}\n")
 
@@ -231,6 +279,8 @@ def process_video_ocr(video_path, output_dir, dict_path,
         frame_boxes, similarities = _run_ocr_on_frames(
             frames_dir,
             change_threshold=eff_threshold,
+            ocr_engine=engine,
+            languages=languages,
         )
         with open(boxes_pkl, "wb") as f:
             pickle.dump(frame_boxes, f)
@@ -239,6 +289,9 @@ def process_video_ocr(video_path, output_dir, dict_path,
         print(f"Saved raw detections to {boxes_pkl}")
 
     # --- Step 3: per-line height normalisation ---
+    # For docTR: groups words by line_idx, normalizes y1/y2, adds parent_box.
+    # For EasyOCR: merges fragmented line detections with close y-centers,
+    #              then normalizes to consistent y1/y2 and parent_box.
     frame_boxes = _normalize_heights(frame_boxes)
 
     # --- Step 4: tracking + height stabilization (on ALL boxes) ---
@@ -249,7 +302,7 @@ def process_video_ocr(video_path, output_dir, dict_path,
         names_dict = json.load(f)
     annotated_boxes = filter_by_names(frame_boxes, names_dict)
 
-    # --- Step 7: convert to unified output format ---
+    # --- Step 6: convert to unified output format ---
     unified = to_unified(annotated_boxes)
 
     # --- Save ---
@@ -290,8 +343,10 @@ def process_videos_batch(video_paths, output_base_dir, dict_path,
                 video_path=video_path,
                 output_dir=video_output_dir,
                 dict_path=dict_path,
+                languages=languages,
                 extract_frames=extract_frames,
                 frame_step=frame_step,
+                ocr_engine=ocr_engine,
             )
             results[video_path.stem] = unified
             print(f"✓  {video_path.stem}")
