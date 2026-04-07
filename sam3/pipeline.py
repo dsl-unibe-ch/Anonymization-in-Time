@@ -30,6 +30,18 @@ from .format import convert_to_unified_dict
 from src.utils.mask_utils import rebuild_full_mask
 from utils import resolve_device, cleanup_device
 
+import copy
+
+
+def _compute_frame_similarity(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
+    """Fast similarity score in [0, 1].  1.0 = identical frames."""
+    small_a = cv2.resize(frame_a, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
+    small_b = cv2.resize(frame_b, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
+    gray_a = cv2.cvtColor(small_a, cv2.COLOR_BGR2GRAY) if small_a.ndim == 3 else small_a
+    gray_b = cv2.cvtColor(small_b, cv2.COLOR_BGR2GRAY) if small_b.ndim == 3 else small_b
+    diff = cv2.absdiff(gray_a, gray_b)
+    return 1.0 - float(np.mean(diff)) / 255.0
+
 
 # ---------------------------------------------------------------------------
 # Visualization
@@ -184,20 +196,48 @@ def process_video_sam3(frames_folder, output_folder,
         all_results = []
         print("\nStarting processing...")
 
+        change_threshold = 0.999
+        max_consecutive_skips = 30
+        prev_frame = None
+        prev_results = None
+        skipped = 0
+        processed = 0
+        consecutive_skips = 0
+
         for frame_idx, img_path in enumerate(tqdm(image_files, desc="Processing frames")):
             try:
                 img = Image.open(img_path).convert('RGB')
                 img_shape = (img.height, img.width)
+                frame_array = np.array(img)
+
+                if prev_frame is not None:
+                    sim = _compute_frame_similarity(prev_frame, frame_array)
+                    if sim >= change_threshold and consecutive_skips < max_consecutive_skips:
+                        all_results.append((frame_idx, copy.deepcopy(prev_results), img_path))
+                        skipped += 1
+                        consecutive_skips += 1
+                        prev_frame = frame_array
+                        continue
+                    else:
+                        consecutive_skips = 0
 
                 results = process_image(predictor, img_path, text_prompt, frame_idx)
                 results = slim_results(results, img_shape, pad=pad, pack_bits=True)
 
                 all_results.append((frame_idx, results, img_path))
+                prev_frame = frame_array
+                prev_results = results
+                processed += 1
 
             except Exception as e:
                 print(f"Error processing {img_path}: {e}")
                 all_results.append((frame_idx, {'boxes': [], 'masks': [], 'scores': []}, img_path))
                 continue
+
+        total = skipped + processed
+        if total > 0:
+            print(f"\nFrame skip summary: {processed} processed, {skipped} skipped"
+                  f" (~{total / max(1, processed):.1f}x speedup)")
 
         print(f"\nSaving masks to pickle: {pickle_path}")
         with open(pickle_path, 'wb') as f:
