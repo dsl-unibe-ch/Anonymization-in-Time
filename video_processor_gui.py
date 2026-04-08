@@ -34,6 +34,7 @@ class VideoProcessorGUI:
         self.output_dir = None
         self.dict_path = None
         self.processing = False
+        self._stop_event = threading.Event()
         self.log_queue = queue.Queue()
         
         # Create UI
@@ -288,6 +289,7 @@ class VideoProcessorGUI:
             return
         
         self.processing = True
+        self._stop_event.clear()
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.progress.start()
@@ -350,6 +352,7 @@ class VideoProcessorGUI:
                     run_ocr=not self.skip_ocr_var.get(),
                     run_sam3=not self.skip_sam3_var.get(),
                     run_transitions=not self.skip_transitions_var.get(),
+                    stop_event=self._stop_event,
                 )
             else:
                 process_multiple_videos(
@@ -365,20 +368,28 @@ class VideoProcessorGUI:
                     run_ocr=not self.skip_ocr_var.get(),
                     run_sam3=not self.skip_sam3_var.get(),
                     run_transitions=not self.skip_transitions_var.get(),
+                    stop_event=self._stop_event,
                 )
-            
-            self.log_queue.put("\n✓ Processing complete!")
+
+            if self._stop_event.is_set():
+                self.log_queue.put("\n⚠ Processing stopped by user.")
+            else:
+                self.log_queue.put("\n✓ Processing complete!")
         except Exception as e:
-            self.log_queue.put(f"\n✗ Error: {str(e)}")
-            import traceback
-            self.log_queue.put(traceback.format_exc())
+            if self._stop_event.is_set():
+                self.log_queue.put("\n⚠ Processing stopped by user.")
+            else:
+                self.log_queue.put(f"\n✗ Error: {str(e)}")
+                import traceback
+                self.log_queue.put(traceback.format_exc())
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
             self.log_queue.put("__DONE__")
     
     def _stop_processing(self):
-        """Stop the processing (note: this just updates UI, doesn't actually stop the thread)"""
+        """Stop the processing."""
+        self._stop_event.set()
         self.processing = False
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
@@ -404,7 +415,8 @@ class VideoProcessorGUI:
             while True:
                 message = self.log_queue.get_nowait()
                 if message == "__DONE__":
-                    self._stop_processing()
+                    if self.processing:
+                        self._stop_processing()
                 else:
                     self._log(message.rstrip())
         except queue.Empty:

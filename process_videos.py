@@ -87,7 +87,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
                         ocr_languages=["en", "de"], ocr_workers=4,
                         sam3_prompt="profile image, profile picture", sam3_batch_size=2,
                         sam3_device='auto', frame_step=1, ocr_engine="doctr",
-                        extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
+                        extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True,
+                        stop_event=None):
     """
     Process a single video through the complete pipeline.
 
@@ -156,6 +157,9 @@ def process_single_video(video_path, output_base_dir, dict_path,
             frames_dir = extract_video_frames(video_path, output_dir=frames_dir, frame_step=frame_step)
             results['frames_dir'] = str(frames_dir)
     
+    if stop_event and stop_event.is_set():
+        return results
+
     # Step 2: Run OCR
     if run_ocr:
         print(f"\n[2/4] Running OCR detection ({ocr_engine})...")
@@ -200,6 +204,9 @@ def process_single_video(video_path, output_base_dir, dict_path,
     else:
         print(f"[2/4] Skipping OCR processing")
     
+    if stop_event and stop_event.is_set():
+        return results
+
     # Step 3: Run SAM3
     if run_sam3:
         print(f"\n[3/4] Running SAM3 mask detection...")
@@ -233,6 +240,9 @@ def process_single_video(video_path, output_base_dir, dict_path,
     else:
         print(f"[3/4] Skipping SAM3 processing")
     
+    if stop_event and stop_event.is_set():
+        return results
+
     # Step 4: Detect transitions
     if run_transitions:
         print(f"\n[4/4] Detecting scene transitions...")
@@ -267,7 +277,8 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                            ocr_languages=["en", "de"], ocr_workers=4,
                            sam3_prompt="profile image, profile picture", sam3_batch_size=2,
                            sam3_device='auto', frame_step=1, ocr_engine="doctr",
-                           extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True):
+                           extract_frames=True, run_ocr=True, run_sam3=True, run_transitions=True,
+                           stop_event=None):
     """
     Process multiple videos through the complete pipeline.
     
@@ -299,6 +310,9 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
     print(f"{'='*70}\n")
     
     for idx, video_path in enumerate(video_paths):
+        if stop_event and stop_event.is_set():
+            break
+
         # Clean up GPU memory before processing each video (especially important after first video)
         if idx > 0:
             print(f"\n{'='*70}")
@@ -322,6 +336,7 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                 run_ocr=run_ocr,
                 run_sam3=run_sam3,
                 run_transitions=run_transitions,
+                stop_event=stop_event,
             )
             all_results.append(result)
         except Exception as e:

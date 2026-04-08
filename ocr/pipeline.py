@@ -99,7 +99,7 @@ def _run_ocr_on_frames(frames_dir: Path,
     processed = 0
     consecutive_skips = 0
 
-    for frame_path in tqdm(frame_paths, desc=f"OCR ({engine} + change detection)"):
+    for frame_path in tqdm(frame_paths, desc=f"OCR ({engine})"):
         frame = cv2.imread(str(frame_path))
         if frame is None:
             print(f"Warning: could not read {frame_path}")

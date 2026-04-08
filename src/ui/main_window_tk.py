@@ -189,34 +189,38 @@ class MainWindow:
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
     
     def _bind_shortcuts(self):
-        """Bind keyboard shortcuts."""
-        self.root.bind('<Left>', lambda e: self._go_to_previous_frame())
-        self.root.bind('<Right>', lambda e: self._go_to_next_frame())
-        self.root.bind('<Up>', lambda e: self._jump_frames(-10))
-        self.root.bind('<Down>', lambda e: self._jump_frames(10))
-        self.root.bind('<Home>', lambda e: self._go_to_position(0))
-        self.root.bind('<End>', lambda e: self._go_to_position(self.annotation_manager.get_frame_count() - 1))
-        self.root.bind('<h>', lambda e: self._toggle_hidden_preview())
-        self.root.bind('<H>', lambda e: self._toggle_hidden_preview())
-        self.root.bind('<b>', lambda e: self._toggle_blur_preview())
-        self.root.bind('<B>', lambda e: self._toggle_blur_preview())
-        self.root.bind('<s>', lambda e: self._save_state())
-        self.root.bind('<S>', lambda e: self._save_state())
-        self.root.bind('<Control-s>', lambda e: self._save_state())
-        self.root.bind('<Control-S>', lambda e: self._save_state())
-        self.root.bind('<Control-q>', lambda e: self._quit())
-        self.root.bind('<Control-Q>', lambda e: self._quit())
-        self.root.bind('<t>', lambda e: self._mark_transition_start())
-        self.root.bind('<T>', lambda e: self._mark_transition_start())
-        self.root.bind('<e>', lambda e: self._mark_transition_end())
-        self.root.bind('<E>', lambda e: self._mark_transition_end())
-        self.root.bind('<r>', lambda e: self._remove_current_transition())
-        self.root.bind('<R>', lambda e: self._remove_current_transition())
-        
+        """Bind keyboard shortcuts.
+
+        Uses bind_all so shortcuts work regardless of which widget has focus
+        (on Windows, bind() on root doesn't fire when a button/slider is focused).
+        """
+        self.root.bind_all('<Left>', lambda e: self._go_to_previous_frame())
+        self.root.bind_all('<Right>', lambda e: self._go_to_next_frame())
+        self.root.bind_all('<Up>', lambda e: self._jump_frames(-10))
+        self.root.bind_all('<Down>', lambda e: self._jump_frames(10))
+        self.root.bind_all('<Home>', lambda e: self._go_to_position(0))
+        self.root.bind_all('<End>', lambda e: self._go_to_position(self.annotation_manager.get_frame_count() - 1))
+        self.root.bind_all('<h>', lambda e: self._toggle_hidden_preview())
+        self.root.bind_all('<H>', lambda e: self._toggle_hidden_preview())
+        self.root.bind_all('<b>', lambda e: self._toggle_blur_preview())
+        self.root.bind_all('<B>', lambda e: self._toggle_blur_preview())
+        self.root.bind_all('<s>', lambda e: self._save_state())
+        self.root.bind_all('<S>', lambda e: self._save_state())
+        self.root.bind_all('<Control-s>', lambda e: self._save_state())
+        self.root.bind_all('<Control-S>', lambda e: self._save_state())
+        self.root.bind_all('<Control-q>', lambda e: self._quit())
+        self.root.bind_all('<Control-Q>', lambda e: self._quit())
+        self.root.bind_all('<t>', lambda e: self._mark_transition_start())
+        self.root.bind_all('<T>', lambda e: self._mark_transition_start())
+        self.root.bind_all('<e>', lambda e: self._mark_transition_end())
+        self.root.bind_all('<E>', lambda e: self._mark_transition_end())
+        self.root.bind_all('<r>', lambda e: self._remove_current_transition())
+        self.root.bind_all('<R>', lambda e: self._remove_current_transition())
+
         # Mouse wheel scrolling
-        self.root.bind('<MouseWheel>', self._on_mouse_wheel)  # Windows/Mac
-        self.root.bind('<Button-4>', lambda e: self._go_to_previous_frame())  # Linux scroll up
-        self.root.bind('<Button-5>', lambda e: self._go_to_next_frame())  # Linux scroll down
+        self.root.bind_all('<MouseWheel>', self._on_mouse_wheel)  # Windows/Mac
+        self.root.bind_all('<Button-4>', lambda e: self._go_to_previous_frame())  # Linux scroll up
+        self.root.bind_all('<Button-5>', lambda e: self._go_to_next_frame())  # Linux scroll down
         
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self._quit)

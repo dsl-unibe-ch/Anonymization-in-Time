@@ -562,7 +562,7 @@ class CanvasWidget(tk.Canvas):
         
         # Calculate font size
         box_height = y2 - y1
-        font_size = max(12, int(box_height * 0.8))
+        font_size = max(14, int(box_height * 1.))
         
         try:
             # Try system fonts with UTF-8 support
