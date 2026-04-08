@@ -18,8 +18,6 @@ from PIL import Image
 from src.utils.mask_utils import rebuild_full_mask
 from .mask_ops import mask_bbox_from_bool, make_mask_entry
 
-from utils import centered_median_smooth
-
 
 def _circle_info_from_mask(full_mask, img_shape=None):
     """
@@ -40,6 +38,14 @@ def _circle_info_from_mask(full_mask, img_shape=None):
     if mask.size == 0 or not mask.any():
         return None
 
+    # Fill interior holes so they don't shrink the area-based radius.
+    mask_u8 = mask.astype(np.uint8) * 255
+    contours_info = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
+    if contours:
+        cv2.drawContours(mask_u8, contours, -1, 255, cv2.FILLED)
+        mask = mask_u8 > 0
+
     bbox = mask_bbox_from_bool(mask)
     if bbox is None:
         return None
@@ -48,15 +54,18 @@ def _circle_info_from_mask(full_mask, img_shape=None):
     bh = max(1, y2 - y1 + 1)
     bbox_aspect = float(min(bw, bh)) / float(max(bw, bh))
 
-    # Center = centroid of mask pixels, radius = area-equivalent circle.
-    # Area-based radius is more stable than minEnclosingCircle which over-
-    # estimates for irregular masks (any contour bump inflates the circle).
+    # Center = centroid of filled mask pixels, radius = area-equivalent circle.
     ys, xs = np.nonzero(mask)
     cx = float(xs.mean())
     cy = float(ys.mean())
 
     visible_area = float(mask.sum())
     r = float(math.sqrt(visible_area / math.pi))
+
+    # Cap radius to half the smaller bbox dimension — bbox is tight and reliable.
+    max_r = float(min(bw, bh)) / 2.0
+    if r > max_r:
+        r = max_r
 
     if not np.isfinite(r) or r <= 0:
         return None
@@ -180,36 +189,18 @@ def circularize_results(all_results, tracks=None, circle_padding_px=6.0):
                 continue
             track_target_radius[track_id] = float(np.median(radii))
 
-    # Stabilize centers per track using centered median (zero lag)
+    # Per-track params: raw centers + median radius (no center smoothing)
     stabilized_params = {}
     if tracks:
         for track_id, track in enumerate(tracks):
             target_r = track_target_radius.get(track_id)
-
-            sorted_entries = sorted(track, key=lambda p: (p[0], p[1]))
-            valid_entries = []
-            raw_cx_list = []
-            raw_cy_list = []
-            for list_idx, mask_idx in sorted_entries:
+            for list_idx, mask_idx in track:
                 info = mask_info_cache.get((list_idx, mask_idx))
                 if info is None or info.get("params") is None:
                     continue
                 raw_cx, raw_cy, raw_r = info["params"]
-                valid_entries.append((list_idx, mask_idx))
-                raw_cx_list.append(float(raw_cx))
-                raw_cy_list.append(float(raw_cy))
-
-            if not valid_entries:
-                continue
-
-            smooth_cx = centered_median_smooth(raw_cx_list, window=5)
-            smooth_cy = centered_median_smooth(raw_cy_list, window=5)
-
-            for i, (list_idx, mask_idx) in enumerate(valid_entries):
-                info = mask_info_cache.get((list_idx, mask_idx))
-                raw_r = float(info["params"][2])
                 r = float(target_r if target_r is not None else raw_r)
-                stabilized_params[(list_idx, mask_idx)] = (smooth_cx[i], smooth_cy[i], r)
+                stabilized_params[(list_idx, mask_idx)] = (float(raw_cx), float(raw_cy), r)
 
     # Final pass: build circular results
     for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):

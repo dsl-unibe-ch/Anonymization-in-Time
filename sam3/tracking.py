@@ -1,21 +1,11 @@
 """
-Temporal tracking (IoU + position-based mask matching) and gap propagation.
+Temporal tracking (IoU-based mask matching) and gap propagation.
 """
 
 import numpy as np
 import cv2
 
 from .mask_ops import mask_entry_to_crop, make_mask_entry
-
-
-def _box_center(box):
-    """Return (cx, cy) of an XYXY box."""
-    return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
-
-
-def _box_size(box):
-    """Return (w, h) of an XYXY box."""
-    return (box[2] - box[0], box[3] - box[1])
 
 
 def calculate_iou(box1, box2):
@@ -33,29 +23,21 @@ def calculate_iou(box1, box2):
     return intersection / union if union > 0 else 0
 
 
-def match_masks_across_frames(results_list, iou_threshold=0.3, max_stale=50):
+def match_masks_across_frames(results_list, iou_threshold=0.3):
     """
-    Match masks across frames using IoU + position/size fallback.
-
-    A track stays open for matching for up to `max_stale` frames after its last
-    detection.  When IoU is zero (no overlap after a gap), we fall back to
-    center-distance + size-similarity to reconnect the track.
+    Match masks across frames by IoU.
 
     Returns list of tracks where each track is a list of (list_idx, mask_idx) pairs.
     """
     if not results_list or len(results_list) == 0:
         return []
 
-    tracks = []           # each track: list of (list_idx, mask_idx)
-    track_last_box = []   # last known box per track
-    track_last_frame = [] # last frame_idx per track
+    tracks = []
 
     first_results = results_list[0][1]
     if first_results and 'boxes' in first_results:
         for mask_idx in range(len(first_results['boxes'])):
             tracks.append([(0, mask_idx)])
-            track_last_box.append(first_results['boxes'][mask_idx])
-            track_last_frame.append(0)
 
     for frame_idx in range(1, len(results_list)):
         curr_results = results_list[frame_idx][1]
@@ -67,71 +49,66 @@ def match_masks_across_frames(results_list, iou_threshold=0.3, max_stale=50):
         matched_tracks = set()
         matched_masks = set()
 
-        # Score every (mask, track) pair, pick best assignments greedily
-        candidates = []
         for mask_idx, curr_box in enumerate(curr_boxes):
-            curr_cx, curr_cy = _box_center(curr_box)
-            curr_w, curr_h = _box_size(curr_box)
+            best_track_idx = -1
+            best_iou = iou_threshold
 
-            for track_idx in range(len(tracks)):
+            for track_idx, track in enumerate(tracks):
                 if track_idx in matched_tracks:
                     continue
 
-                # Skip tracks that have been stale too long
-                stale_frames = frame_idx - track_last_frame[track_idx]
-                if stale_frames > max_stale:
+                last_frame, last_mask_idx = track[-1]
+                last_results = results_list[last_frame][1]
+                last_box = last_results['boxes'][last_mask_idx]
+
+                # Reject if box areas are too different (e.g. small group-chat
+                # icon overlapping a large chat-list icon during transition)
+                curr_area = (curr_box[2] - curr_box[0]) * (curr_box[3] - curr_box[1])
+                last_area = (last_box[2] - last_box[0]) * (last_box[3] - last_box[1])
+                if min(curr_area, last_area) < 0.75 * max(curr_area, last_area):
                     continue
 
-                last_box = track_last_box[track_idx]
                 iou = calculate_iou(curr_box, last_box)
 
-                if iou >= iou_threshold:
-                    # High confidence match via IoU
-                    candidates.append((mask_idx, track_idx, 2.0 + iou))
-                else:
-                    # Fallback: center distance + size similarity
-                    last_cx, last_cy = _box_center(last_box)
-                    last_w, last_h = _box_size(last_box)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_track_idx = track_idx
 
-                    # Normalized distance: relative to box size
-                    avg_size = max(1.0, (last_w + last_h + curr_w + curr_h) / 4.0)
-                    dist = np.sqrt((curr_cx - last_cx)**2 + (curr_cy - last_cy)**2)
-                    norm_dist = dist / avg_size
-
-                    # Size ratio (closer to 1.0 = better)
-                    size_ratio = min(curr_w, last_w) / max(curr_w, last_w, 1.0) * \
-                                 min(curr_h, last_h) / max(curr_h, last_h, 1.0)
-
-                    # Accept if close enough in position and similar size
-                    if norm_dist < 1.5 and size_ratio > 0.5:
-                        # Score: higher is better (invert distance, weight size)
-                        score = size_ratio / (1.0 + norm_dist)
-                        candidates.append((mask_idx, track_idx, score))
-
-        # Greedy assignment: best scores first
-        candidates.sort(key=lambda c: -c[2])
-        for mask_idx, track_idx, score in candidates:
-            if mask_idx in matched_masks or track_idx in matched_tracks:
-                continue
-            tracks[track_idx].append((frame_idx, mask_idx))
-            track_last_box[track_idx] = curr_boxes[mask_idx]
-            track_last_frame[track_idx] = frame_idx
-            matched_tracks.add(track_idx)
-            matched_masks.add(mask_idx)
-
-        # Start new tracks for unmatched masks
-        for mask_idx in range(len(curr_boxes)):
-            if mask_idx not in matched_masks:
+            if best_track_idx >= 0:
+                tracks[best_track_idx].append((frame_idx, mask_idx))
+                matched_tracks.add(best_track_idx)
+                matched_masks.add(mask_idx)
+            else:
                 tracks.append([(frame_idx, mask_idx)])
-                track_last_box.append(curr_boxes[mask_idx])
-                track_last_frame.append(frame_idx)
+                matched_masks.add(mask_idx)
 
     return tracks
 
 
+def _boxes_overlap(box_a, box_b):
+    """Return True if two XYXY boxes overlap with positive area."""
+    return (box_a[0] < box_b[2] and box_b[0] < box_a[2] and
+            box_a[1] < box_b[3] and box_b[1] < box_a[3])
+
+
 def propagate_missing_masks(results_list, tracks, max_gap=5):
-    """Fill gaps in tracks by interpolating masks."""
+    """
+    Fill gaps in tracks by interpolating masks.
+
+    Before placing a propagated mask, checks that it doesn't overlap any
+    real (original) detection in that frame. If it does, the mask likely
+    moved and the propagated position is wrong — skip it.
+    """
+    # Snapshot original boxes per frame before we start adding propagated ones
+    original_boxes = {}
+    for frame_idx, (_, frame_results, _) in enumerate(results_list):
+        if frame_results and 'boxes' in frame_results:
+            original_boxes[frame_idx] = list(frame_results['boxes'])
+        else:
+            original_boxes[frame_idx] = []
+
     filled_count = 0
+    skipped_count = 0
 
     for track in tracks:
         if len(track) < 2:
@@ -163,6 +140,16 @@ def propagate_missing_masks(results_list, tracks, max_gap=5):
 
                 interp_box = curr_box * (1 - alpha) + next_box * alpha
 
+                # Skip if propagated box overlaps any real detection in this frame
+                overlaps_real = False
+                for real_box in original_boxes.get(missing_frame, []):
+                    if _boxes_overlap(interp_box, real_box):
+                        overlaps_real = True
+                        break
+                if overlaps_real:
+                    skipped_count += 1
+                    continue
+
                 x1, y1, x2, y2 = interp_box
                 target_w = max(1, int(round(x2 - x1 + 1)))
                 target_h = max(1, int(round(y2 - y1 + 1)))
@@ -192,5 +179,8 @@ def propagate_missing_masks(results_list, tracks, max_gap=5):
                 missing_results['scores'].append(0.5)
 
                 filled_count += 1
+
+    if skipped_count > 0:
+        print(f"  Skipped {skipped_count} propagated mask(s) that overlapped real detections")
 
     return filled_count
