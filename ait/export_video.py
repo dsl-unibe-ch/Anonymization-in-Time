@@ -108,7 +108,7 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2, font_p
     
     # Calculate font size based on bounding box height
     box_height = y2 - y1
-    font_size = max(14, int(box_height * 1.))
+    font_size = max(12, int(box_height * 0.8))
     
     try:
         # Try to load custom font
