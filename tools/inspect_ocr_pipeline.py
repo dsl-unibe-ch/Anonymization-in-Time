@@ -171,11 +171,11 @@ def _blur_and_label(frame: np.ndarray, boxes: list, title: str) -> np.ndarray:
         if alterego:
             box_w = x2c - x1c
             box_h = y2c - y1c
-            # Pick font scale to fit the box width
-            scale = 0.5
+            # Pick font scale to fit the box width (~80% of box)
+            scale = 0.4
             (tw, th), _ = cv2.getTextSize(alterego, FONT, scale, 1)
-            if tw > box_w * 0.9 and tw > 0:
-                scale *= (box_w * 0.9) / tw
+            if tw > box_w * 0.8 and tw > 0:
+                scale *= (box_w * 0.8) / tw
                 (tw, th), _ = cv2.getTextSize(alterego, FONT, scale, 1)
             tx = x1c + (box_w - tw) // 2
             ty = y1c + (box_h + th) // 2
