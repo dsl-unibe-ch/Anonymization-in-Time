@@ -418,7 +418,7 @@ class CanvasWidget(tk.Canvas):
                     
                     # Unpack if needed
                     if isinstance(mask, dict):
-                        from utils.mask_utils import unpack_mask_entry
+                        from ait.viewer.utils.mask_utils import unpack_mask_entry
                         crop, bbox = unpack_mask_entry(mask)
                         if bbox is not None:
                             # Check if point is in bbox first

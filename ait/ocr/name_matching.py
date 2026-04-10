@@ -274,12 +274,22 @@ def _find_matches_in_line(line: list, name_index: dict) -> list:
             ocr_text = " ".join(b.get("text", "") for b in matched_boxes)
             bbox = _compute_parent_box(matched_boxes)
 
+            # Split alterego into per-word pieces aligned with matched boxes
+            alt_words = partial_alterego.split() if partial_alterego else []
+            per_word_alteregos = {}
+            for wi, idx in enumerate(matched_indices):
+                if wi < len(alt_words):
+                    per_word_alteregos[idx] = alt_words[wi]
+                else:
+                    per_word_alteregos[idx] = ""
+
             matches.append({
                 "box_indices": set(matched_indices),
                 "bbox": bbox,
                 "text": ocr_text,
                 "name": entry["original"],
                 "alterego": partial_alterego,
+                "per_word_alteregos": per_word_alteregos,
                 "confidence": avg_conf,
                 "full_match": is_full,
             })
@@ -339,7 +349,7 @@ def filter_by_names(frame_boxes: dict, names_dict: dict) -> dict:
                     matched_indices.add(idx)
                     match_info[idx] = {
                         "name": m["name"],
-                        "alterego": m["alterego"],
+                        "alterego": m["per_word_alteregos"].get(idx, ""),
                         "confidence": m["confidence"],
                     }
 

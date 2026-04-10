@@ -80,6 +80,13 @@ def extract_words(image_bgr: np.ndarray, predictor=None,
                     x2 = int(round(xmax * w))
                     y2 = int(round(ymax * h))
 
+                    # Pad vertically — docTR boxes are tight and can clip
+                    # ascenders/descenders. 15% of box height on each side.
+                    box_h = y2 - y1
+                    pad = max(1, int(round(box_h * 0.15)))
+                    y1 = max(0, y1 - pad)
+                    y2 = min(h, y2 + pad)
+
                     if (x2 - x1) * (y2 - y1) < min_area:
                         continue
 

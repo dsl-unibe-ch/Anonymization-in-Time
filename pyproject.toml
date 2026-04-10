@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 processing = [
     "easyocr>=1.7.1",
+    "python-doctr[torch]>=0.9.0",
     "einops>=0.6.1",
     # Torch pins (use platform-appropriate wheels; see README for CUDA/MPS notes)
     "torch==2.7.0",
