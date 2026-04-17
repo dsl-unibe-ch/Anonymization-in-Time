@@ -97,7 +97,7 @@ python -m ait.export_video --help
 
 The `ait` command opens the AiT launcher — the central hub for the three tools.
 
-![Launcher UI](docs/screenshots/launcher.png)
+<img src="docs/screenshots/launcher.png" height="400">
 
 - **Video Processor** — runs the detection pipeline on your video files. Click **Launch Video Processor** to open it.
 - **Annotation Viewer** — lets you review and refine detections before exporting. Select a processed video folder first, then click **Launch Annotation Viewer**.
@@ -109,7 +109,7 @@ The `ait` command opens the AiT launcher — the central hub for the three tools
 
 The Video Processor runs the full detection pipeline on your videos: frame extraction, OCR name detection, SAM3 profile picture segmentation, and scene transition detection.
 
-![Video Processor UI](docs/screenshots/video_processor.jpg)
+<img src="docs/screenshots/video_processor.jpg" height="400">
 
 ### Input (1)
 
@@ -156,7 +156,7 @@ Real-time output from the pipeline, showing progress for each stage.
 
 The Annotation Viewer lets you review and refine the automated detections before exporting the anonymized video. You can toggle individual annotations on/off to control exactly what gets blurred.
 
-![Annotation Viewer UI](docs/screenshots/annotation_viewer.jpg)
+<img src="docs/screenshots/annotation_viewer.jpg" height="400">
 
 ### Canvas (1)
 
