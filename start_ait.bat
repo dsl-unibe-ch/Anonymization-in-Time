@@ -10,7 +10,7 @@ if errorlevel 1 (
     echo Processing libraries not found. Installing dependencies...
     echo This only happens once and may take a few minutes.
     echo.
-    pip install -e ".[processing]"
+    pip install -e .
     if errorlevel 1 (
         echo.
         echo Installation failed. See error above.

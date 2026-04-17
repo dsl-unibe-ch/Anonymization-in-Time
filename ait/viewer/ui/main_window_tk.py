@@ -372,12 +372,18 @@ class MainWindow:
         self._update_labels(frame_idx)
     
     def _save_state(self):
-        """Save current state."""
-        if self.annotation_manager.save_state():
-            messagebox.showinfo("Success", "State saved successfully!")
+        """Save current annotation state and transitions."""
+        state_ok = self.annotation_manager.save_state()
+        trans_ok = self.transition_manager.save_transitions()
+        if state_ok and trans_ok:
+            messagebox.showinfo("Success", "State and transitions saved successfully!")
             self._update_status("State saved", timeout=3000)
+        elif state_ok:
+            messagebox.showwarning("Partial Save", "State saved, but transitions failed to save")
+        elif trans_ok:
+            messagebox.showwarning("Partial Save", "Transitions saved, but state failed to save")
         else:
-            messagebox.showerror("Error", "Failed to save state")
+            messagebox.showerror("Error", "Failed to save state and transitions")
     
     def _export_visibility(self):
         """Export visibility state."""
@@ -532,8 +538,6 @@ class MainWindow:
                 return
             elif result:  # Yes, save
                 self._save_state()
-                if self.transition_manager.modified:
-                    self._save_transitions()
         
         self.root.quit()
     
