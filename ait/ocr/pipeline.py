@@ -222,15 +222,18 @@ def _normalize_heights(frame_boxes: dict, y_merge_threshold: int = 10) -> dict:
                     "parent_box": parent_box,
                 }
 
-            # Step 4: close gaps between adjacent words on the same line
-            # (groups are already x-proximity checked, so all gaps here are valid)
+            # Step 4: close gaps between adjacent words on the same line.
+            # Cap gap-closing at ~1.5x line height so phantom detections far
+            # from real text (e.g. in a profile-pic area) don't pull bbox
+            # edges across the gap.
             sorted_line = sorted(indices, key=lambda i: adjusted[i]["bbox"][0])
+            max_close = max(1, med_y2 - med_y1) * 1.5
             for j in range(len(sorted_line) - 1):
                 li = sorted_line[j]
                 ri = sorted_line[j + 1]
                 lx2 = adjusted[li]["bbox"][2]
                 rx1 = adjusted[ri]["bbox"][0]
-                if rx1 > lx2:
+                if lx2 < rx1 <= lx2 + max_close:
                     mid = (lx2 + rx1) // 2
                     lbox = adjusted[li]["bbox"]
                     rbox = adjusted[ri]["bbox"]

@@ -33,9 +33,9 @@ from tqdm import tqdm
 # ===========================  CONFIG  =======================================
 # ---------------------------------------------------------------------------
 
-VIDEO_PATH      = r""           # path to input video  (or leave empty)
-FRAMES_DIR      = r""           # path to existing frames dir (used if VIDEO_PATH is empty)
-OUTPUT_VIDEO    = r""
+VIDEO_PATH      = r"docs\example\test.mp4"              # path to input video  (or leave empty)
+FRAMES_DIR      = r""                                   # path to existing frames dir (used if VIDEO_PATH is empty)
+OUTPUT_VIDEO    = r"docs\example\test_sam3.mp4"         # path to output video
 
 OUTPUT_FPS      = 20            # fps for output video
 TEXT_PROMPT     = "profile image, profile picture"

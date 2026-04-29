@@ -33,10 +33,10 @@ from tqdm import tqdm
 # ===========================  CONFIG  =======================================
 # ---------------------------------------------------------------------------
 
-VIDEO_PATH      = r""           # path to input video  (or leave empty)
-FRAMES_DIR      = r""           # path to existing frames dir (used if VIDEO_PATH is empty)
-NAMES_JSON      = r""           # path to names dict JSON
-OUTPUT_VIDEO    = r""
+VIDEO_PATH      = r"docs\example\test.mp4"              # path to input video  (or leave empty)
+FRAMES_DIR      = r""                                   # path to existing frames dir (used if VIDEO_PATH is empty)
+NAMES_JSON      = r"docs\example\test.json"             # path to names dict JSON
+OUTPUT_VIDEO    = r"docs\example\test_ocr.mp4"          # path to output video
 
 OUTPUT_FPS      = 20            # fps for output video (use low value to read labels)
 
@@ -48,7 +48,7 @@ END_SEC         = None          # e.g. 20.0  — None = to end
 CHANGE_THRESHOLD = 0.999
 
 # OCR engine: "doctr" or "easyocr"
-OCR_ENGINE      = "easyocr"
+OCR_ENGINE      = "doctr"
 LANGUAGES       = ["en", "de"]          # language list for EasyOCR (ignored by docTR)
 
 # Confidence / area thresholds

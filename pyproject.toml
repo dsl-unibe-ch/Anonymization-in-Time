@@ -1,12 +1,39 @@
 [project]
-name = "ait-app"
+name = "anonymization-in-time"
 version = "1.0.0"
 description = "AiT (Anonymization in Time) - Video anonymization tool for chat recordings"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE.txt" }
+authors = [
+    { name = "Matteo Boi" },
+    { name = "University of Bern, Data Science Lab" },
+]
+keywords = [
+    "anonymization",
+    "video",
+    "ocr",
+    "segmentation",
+    "privacy",
+    "sam3",
+    "easyocr",
+    "doctr",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
 
 dependencies = [
-    "numpy==1.26.4",
+    "numpy>=1.24,<2.0",
     "Pillow>=10.0.0",
     "opencv-python>=4.8.0",
     "tqdm>=4.66.0",
@@ -14,17 +41,22 @@ dependencies = [
     "easyocr>=1.7.1",
     "python-doctr[torch]>=0.9.0",
     "einops>=0.6.1",
-    # Torch pins (use platform-appropriate wheels; see README for CUDA/MPS notes)
-    "torch==2.7.0",
-    "torchvision==0.22.0",
-    "torchaudio==2.7.0",
+    "torch>=2.0",
     "transformers>=4.46.0",
+    "ultralytics>=8.0.114",
+    "scikit-learn>=1.4.0",
+    "pycocotools>=2.0.6",
 ]
 
 [project.optional-dependencies]
 build = [
     "pyinstaller>=6.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/dsl-unibe-ch/Anonymization-in-Time"
+Repository = "https://github.com/dsl-unibe-ch/Anonymization-in-Time"
+Issues = "https://github.com/dsl-unibe-ch/Anonymization-in-Time/issues"
 
 [project.scripts]
 ait = "ait.launcher:main"
