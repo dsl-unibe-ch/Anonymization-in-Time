@@ -32,30 +32,29 @@ AiT_app/
 
 ## Installation
 
-### 1. Install the package
+### 1. PyTorch (install first if you need GPU)
 
+PyPI only distributes CPU torch builds. For GPU acceleration, install the CUDA build **before** the package:
 ```bash
-pip install -e .
+# CUDA 12.6 (replace cu126 with your version, e.g. cu118, cu121, cu124)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Or with requirements.txt:
+Check your CUDA version with `nvidia-smi`. Skip this step if CPU-only is fine.
+
+### 2. Install the package
+
 ```bash
-pip install -r requirements.txt
-pip install -e .
+pip install anonymization-in-time
 ```
 
-### 2. PyTorch (for processing)
-
-If you need GPU acceleration, install PyTorch with CUDA before the package:
+**For development** (editable install from source):
 ```bash
-# CUDA 12.6
-pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
-
-# CPU/MPS (default)
-pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0
+pip install -e .
 ```
 
 ### 3. SAM3 model weights
+
 
 > ⚠️ **SAM 3 Model Weights Required**
 > Unlike other Ultralytics models, SAM 3 weights are not automatically downloaded. You must:
