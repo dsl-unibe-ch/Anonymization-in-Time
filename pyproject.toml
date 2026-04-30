@@ -1,6 +1,6 @@
 [project]
 name = "anonymization-in-time"
-version = "1.1.0"
+version = "1.1.1"
 description = "AiT (Anonymization in Time) - Video anonymization tool for chat recordings"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,7 +33,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "numpy>=1.24,<2.0",
+    "numpy>=1.24",
     "Pillow>=10.0.0",
     "opencv-python>=4.8.0",
     "tqdm>=4.66.0",
