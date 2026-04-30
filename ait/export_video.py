@@ -14,7 +14,8 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image, ImageDraw, ImageFont
 
-from ait.utils import rebuild_full_mask
+from ait.utils import (rebuild_full_mask, shared_alterego_font_sizes,
+                       load_alterego_font, fit_alterego_font_size)
 
 
 def apply_blur_to_region(image, mask, blur_strength=51):
@@ -42,17 +43,19 @@ def apply_blur_to_region(image, mask, blur_strength=51):
     return result
 
 
-def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2, font_path=None):
+def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2,
+                              font_path=None, font_size=None):
     """
     Add replacement text with color matching using PIL.
-    
+
     Args:
         frame: OpenCV frame (BGR format)
         bbox: Bounding box dictionary containing alterego text
         original_patch: Unblurred region used to infer original text color
         x1, y1, x2, y2: Text region coordinates
         font_path: Path to custom font file (optional)
-        
+        font_size: If provided, use this exact font size (otherwise auto-fit)
+
     Returns:
         Frame with custom text overlaid
     """
@@ -106,37 +109,9 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2, font_p
     pil_image = Image.fromarray(frame_rgb)
     draw = ImageDraw.Draw(pil_image)
     
-    # Calculate font size based on bounding box height
-    box_height = y2 - y1
-    font_size = max(12, int(box_height * 0.8))
-    
-    try:
-        # Try to load custom font
-        if font_path and os.path.exists(font_path):
-            font = ImageFont.truetype(font_path, font_size, encoding='utf-8')
-        else:
-            # Fallback to system fonts with UTF-8 support
-            fallback_fonts = [
-                "arial.ttf", "Arial.ttf",           # Windows
-                "arialuni.ttf",                     # Arial Unicode MS (good UTF-8 support)
-                "Helvetica.ttc",                    # macOS
-                "DejaVuSans.ttf",                   # Linux (excellent UTF-8 support)
-                "NotoSans-Regular.ttf",             # Android/Linux (comprehensive Unicode)
-                "Roboto-Regular.ttf"                # Android
-            ]
-            
-            font = None
-            for font_name in fallback_fonts:
-                try:
-                    font = ImageFont.truetype(font_name, font_size, encoding='utf-8')
-                    break
-                except (OSError, IOError):
-                    continue
-            
-            if font is None:
-                font = ImageFont.load_default()
-    except (OSError, IOError):
-        font = ImageFont.load_default()
+    if font_size is None:
+        font_size = fit_alterego_font_size(text, x2 - x1, y2 - y1, font_path)
+    font = load_alterego_font(font_path, font_size)
     
     # Get text bounding box for centering
     bbox_text = draw.textbbox((0, 0), text, font=font)
@@ -413,10 +388,20 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
             strength = transition_blur_strength if in_transition else blur_strength
             frame = apply_blur_to_region(frame, blur_mask, strength)
         
-        # Add custom text overlays for OCR boxes with alterego text
+        # Uniform font size per matched name — so adjacent words of one
+        # alterego render at the same visual size.
+        anns_only = [t[0] for t in ocr_text_overlays]
+        coords_by_id = {id(t[0]): (t[2], t[3], t[4], t[5]) for t in ocr_text_overlays}
+        def _per_box_size(ann):
+            x1, y1, x2, y2 = coords_by_id[id(ann)]
+            return fit_alterego_font_size(ann.get('alterego', ''), x2 - x1, y2 - y1, font_path)
+        group_sizes = shared_alterego_font_sizes(anns_only, _per_box_size)
         for ann, original_patch, x1, y1, x2, y2 in ocr_text_overlays:
             if ann.get('alterego', '').strip():
-                frame = add_custom_text_to_frame(frame, ann, original_patch, x1, y1, x2, y2, font_path)
+                frame = add_custom_text_to_frame(
+                    frame, ann, original_patch, x1, y1, x2, y2,
+                    font_path, font_size=group_sizes.get(id(ann)),
+                )
         
         # Write frame to video
         out.write(frame)

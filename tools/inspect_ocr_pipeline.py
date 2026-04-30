@@ -67,6 +67,7 @@ from ait.ocr.name_matching import filter_by_names
 from ait.ocr.pipeline import _normalize_heights
 from ait.ocr.stabilization import stabilize
 from ait.ocr import pipeline as _pipe
+from ait.utils import shared_alterego_font_sizes
 
 
 # ---------------------------------------------------------------------------
@@ -143,43 +144,55 @@ def _annotate_panel(frame: np.ndarray, boxes: list,
     return panel
 
 
+def _fit_text_scale(text: str, box_w: int) -> float:
+    """Largest cv2 putText scale that fits text into ~80% of box_w."""
+    scale = 0.4
+    (tw, _), _ = cv2.getTextSize(text, FONT, scale, 1)
+    if tw > box_w * 0.8 and tw > 0:
+        scale *= (box_w * 0.8) / tw
+    return scale
+
+
 def _blur_and_label(frame: np.ndarray, boxes: list, title: str) -> np.ndarray:
     """
     For each to_show box: Gaussian-blur the bbox region, then draw the
-    alterego name centered on top.
+    alterego name centered on top.  Adjacent words of the same matched
+    name share a single (minimum) scale so they render at one size.
     """
     panel = frame.copy()
+    h, w = panel.shape[:2]
+
+    clamped = []
     for box in boxes:
         if not box.get("to_show"):
             continue
         x1, y1, x2, y2 = box["bbox"]
-        # Clamp to frame bounds
-        h, w = panel.shape[:2]
         x1c, y1c = max(0, x1), max(0, y1)
         x2c, y2c = min(w, x2), min(h, y2)
         if x2c <= x1c or y2c <= y1c:
             continue
+        clamped.append((box, x1c, y1c, x2c, y2c))
 
-        # Blur the region
+    coords_by_id = {id(b): (x1c, x2c) for b, x1c, _, x2c, _ in clamped}
+    def _per_box(b):
+        x1c, x2c = coords_by_id[id(b)]
+        return _fit_text_scale(b.get("alterego", ""), x2c - x1c)
+    group_scaled = shared_alterego_font_sizes([b for b, *_ in clamped], _per_box)
+
+    for box, x1c, y1c, x2c, y2c in clamped:
         roi = panel[y1c:y2c, x1c:x2c]
-        ksize = max(15, ((y2c - y1c) // 2) | 1)  # odd kernel, proportional to box height
+        ksize = max(15, ((y2c - y1c) // 2) | 1)
         blurred = cv2.GaussianBlur(roi, (ksize, ksize), 0)
         panel[y1c:y2c, x1c:x2c] = blurred
 
-        # Draw alterego text centered in the box
         alterego = box.get("alterego", "")
         if alterego:
             box_w = x2c - x1c
             box_h = y2c - y1c
-            # Pick font scale to fit the box width (~80% of box)
-            scale = 0.4
+            scale = group_scaled.get(id(box)) or _fit_text_scale(alterego, box_w)
             (tw, th), _ = cv2.getTextSize(alterego, FONT, scale, 1)
-            if tw > box_w * 0.8 and tw > 0:
-                scale *= (box_w * 0.8) / tw
-                (tw, th), _ = cv2.getTextSize(alterego, FONT, scale, 1)
             tx = x1c + (box_w - tw) // 2
             ty = y1c + (box_h + th) // 2
-            # Shadow for readability
             cv2.putText(panel, alterego, (tx + 1, ty + 1), FONT, scale, (0, 0, 0), 2, cv2.LINE_AA)
             cv2.putText(panel, alterego, (tx, ty), FONT, scale, (255, 255, 255), 1, cv2.LINE_AA)
 

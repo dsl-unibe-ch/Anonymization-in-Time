@@ -2,12 +2,109 @@ import subprocess
 import cv2
 import os
 import glob
+import functools
 from pathlib import Path
 import pickle
 import re
 import unicodedata
 import numpy as np
+from collections import defaultdict
 from tqdm import tqdm
+from PIL import ImageFont
+
+
+######### OCR RENDERING HELPERS #########
+
+_FONT_FALLBACKS = (
+    "arial.ttf", "Arial.ttf",
+    "arialuni.ttf",
+    "Helvetica.ttc",
+    "DejaVuSans.ttf",
+    "NotoSans-Regular.ttf",
+    "Roboto-Regular.ttf",
+)
+
+
+@functools.lru_cache(maxsize=128)
+def load_alterego_font(font_path, size):
+    """Load custom font, falling back to common system fonts. Cached by (path, size)."""
+    if font_path and os.path.exists(font_path):
+        try:
+            return ImageFont.truetype(font_path, size, encoding='utf-8')
+        except (OSError, IOError):
+            pass
+    for name in _FONT_FALLBACKS:
+        try:
+            return ImageFont.truetype(name, size, encoding='utf-8')
+        except (OSError, IOError):
+            continue
+    return ImageFont.load_default()
+
+
+def fit_alterego_font_size(text, box_w, box_h, font_path=None,
+                            height_factor=0.8, width_factor=0.95,
+                            min_size=8):
+    """
+    Largest font size whose rendered text fits inside (box_w, box_h).
+
+    Starts from height_factor * box_h and shrinks until width fits.
+    """
+    text = (text or "").strip()
+    if not text or box_w <= 0 or box_h <= 0:
+        return min_size
+    size = max(min_size, int(box_h * height_factor))
+    max_w = box_w * width_factor
+    while size > min_size:
+        font = load_alterego_font(font_path, size)
+        bbox = font.getbbox(text)
+        if (bbox[2] - bbox[0]) <= max_w:
+            return size
+        size = max(min_size, int(size * 0.92))
+    return min_size
+
+
+def shared_alterego_font_sizes(annotations, per_box_size_fn):
+    """
+    Compute a uniform font size for each OCR annotation belonging to the
+    same matched name (so adjacent words like "Bob Smith" replacing
+    "Mark Jhonson" render at the same visual size).
+
+    Group key is (parent_box, name) — every word box of one match shares
+    these. For each group the size is the min of the per-box best sizes
+    (i.e. the largest size that still fits in every box of the group).
+
+    Args:
+        annotations: iterable of OCR annotation dicts (with `bbox`, `name`,
+                     `parent_box`, `alterego`, `to_show`).
+        per_box_size_fn: callable(ann) -> numeric, returning the best
+                         font size (or scale) that fits this single box.
+
+    Returns:
+        dict mapping id(ann) -> shared font size. Annotations with empty
+        alterego or to_show=False are not included.
+    """
+    sizes = {}
+    groups = defaultdict(list)
+    for ann in annotations:
+        if not ann.get("to_show"):
+            continue
+        if not (ann.get("alterego") or "").strip():
+            continue
+        sizes[id(ann)] = per_box_size_fn(ann)
+        name = ann.get("name") or ""
+        parent = ann.get("parent_box")
+        if name and parent is not None:
+            key = (tuple(parent), name)
+        else:
+            key = (id(ann),)  # ungrouped
+        groups[key].append(ann)
+
+    final = {}
+    for group in groups.values():
+        s = min(sizes[id(a)] for a in group)
+        for a in group:
+            final[id(a)] = s
+    return final
 
 ######### VIDEO LOADING & SAVING #########
 

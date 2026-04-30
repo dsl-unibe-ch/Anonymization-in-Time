@@ -1,6 +1,6 @@
 [project]
 name = "anonymization-in-time"
-version = "1.0.0"
+version = "1.1.0"
 description = "AiT (Anonymization in Time) - Video anonymization tool for chat recordings"
 readme = "README.md"
 requires-python = ">=3.10"

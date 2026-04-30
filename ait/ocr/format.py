@@ -9,6 +9,8 @@ Output schema per box:
         "score":      float,               docTR word confidence
         "text":       str,                 detected OCR text
         "alterego":   str,                 replacement name ("" if none)
+        "name":       str,                 matched dictionary name ("" if none) -
+                                            shared by all word boxes of one match
         "mask":       None,                always None for OCR source
         "source":     "ocr",
         "to_show":    bool,
@@ -58,6 +60,7 @@ def to_unified(frame_boxes: dict) -> dict:
                 "score":      float(box.get("confidence", 1.0)),
                 "text":       box.get("text", "") or "",
                 "alterego":   box.get("alterego", "") or "",
+                "name":       box.get("name", "") or "",
                 "mask":       None,
                 "source":     "ocr",
                 "to_show":    bool(box.get("to_show", True)),

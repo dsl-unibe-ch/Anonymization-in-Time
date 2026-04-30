@@ -10,6 +10,8 @@ import tkinter as tk
 import sys
 
 from ait.viewer.utils.mask_utils import rebuild_full_mask
+from ait.utils import (shared_alterego_font_sizes, load_alterego_font,
+                        fit_alterego_font_size)
 
 
 class CanvasWidget(tk.Canvas):
@@ -503,16 +505,27 @@ class CanvasWidget(tk.Canvas):
             blurred = cv2.GaussianBlur(cv_img, (kernel_size, kernel_size), 0)
             cv_img[blur_mask] = blurred[blur_mask]
         
-        # Add text overlays
+        # Uniform font size per matched name — so adjacent words of one
+        # alterego render at the same visual size.
+        anns_only = [t[0] for t in ocr_text_overlays]
+        coords_by_id = {id(t[0]): (t[2], t[3], t[4], t[5]) for t in ocr_text_overlays}
+        def _per_box_size(ann):
+            x1, y1, x2, y2 = coords_by_id[id(ann)]
+            return fit_alterego_font_size(ann.get('alterego', ''), x2 - x1, y2 - y1)
+        group_sizes = shared_alterego_font_sizes(anns_only, _per_box_size)
         for ann, original_patch, x1, y1, x2, y2 in ocr_text_overlays:
             alterego = ann.get('alterego', '').strip()
             if alterego:
-                cv_img = self._add_text_overlay(cv_img, ann, original_patch, x1, y1, x2, y2)
+                cv_img = self._add_text_overlay(
+                    cv_img, ann, original_patch, x1, y1, x2, y2,
+                    font_size=group_sizes.get(id(ann)),
+                )
         
         # Convert back to PIL
         return Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
     
-    def _add_text_overlay(self, cv_img, ann, original_patch, x1, y1, x2, y2):
+    def _add_text_overlay(self, cv_img, ann, original_patch, x1, y1, x2, y2,
+                          font_size=None):
         """Add replacement text with color matching."""
         text = ann.get('alterego', '').strip()
         if not text:
@@ -560,30 +573,9 @@ class CanvasWidget(tk.Canvas):
         pil_img = Image.fromarray(cv_rgb)
         draw = ImageDraw.Draw(pil_img)
         
-        # Calculate font size
-        box_height = y2 - y1
-        font_size = max(12, int(box_height * 0.8))
-        
-        try:
-            # Try system fonts with UTF-8 support
-            font = None
-            fallback_fonts = [
-                "arial.ttf", "Arial.ttf",        # Windows
-                "arialuni.ttf",                  # Arial Unicode MS
-                "DejaVuSans.ttf",                # Linux (excellent UTF-8)
-                "NotoSans-Regular.ttf",          # Comprehensive Unicode
-                "Roboto-Regular.ttf"             # Android
-            ]
-            for font_name in fallback_fonts:
-                try:
-                    font = ImageFont.truetype(font_name, font_size, encoding='utf-8')
-                    break
-                except:
-                    continue
-            if font is None:
-                font = ImageFont.load_default()
-        except:
-            font = ImageFont.load_default()
+        if font_size is None:
+            font_size = fit_alterego_font_size(text, x2 - x1, y2 - y1)
+        font = load_alterego_font(None, font_size)
         
         # Get text size and center
         bbox_text = draw.textbbox((0, 0), text, font=font)
