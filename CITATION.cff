@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: "Boi"
+    given-names: "Matteo"
+    orcid: "https://orcid.org/0009-0006-8007-0018"
+title: "AiT: Anonymization in Time"
+version: 1.1.1
+date-released: 2026-04-30
+url: "https://github.com/dsl-unibe-ch/Anonymization-in-Time"
+repository-code: "https://github.com/dsl-unibe-ch/Anonymization-in-Time"
+license: MIT
+abstract: "Video anonymization tool for chat recordings. Detects and blurs names (OCR) and profile pictures (SAM3 segmentation) with a reviewable annotation viewer."
+keywords:
+  - anonymization
+  - video
+  - ocr
+  - segmentation
+  - privacy
