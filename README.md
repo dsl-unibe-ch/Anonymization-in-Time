@@ -32,9 +32,9 @@ AiT_app/
 
 ## Installation
 
-### 1. PyTorch (install first if you need GPU)
+### 1. PyTorch
 
-PyPI only distributes CPU torch builds. For GPU acceleration, install the CUDA build **before** the package:
+For GPU acceleration, install the CUDA build **before** the package:
 ```bash
 # CUDA 12.6 (replace cu126 with your version, e.g. cu118, cu121, cu124)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
