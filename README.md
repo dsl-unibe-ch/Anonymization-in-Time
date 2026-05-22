@@ -26,8 +26,9 @@ AiT_app/
 │   ├── inspect_sam3_pipeline.py
 │   └── inspect_ocr_pipeline.py
 ├── pyproject.toml
-├── requirements.txt
-└── sam3.pt                  # Model weights (download separately)
+└── requirements.txt
+
+# SAM3 model weights (download separately, point AiT at them via the GUI or --sam3_model)
 ```
 
 ## Installation
@@ -60,9 +61,15 @@ pip install -e .
 > Unlike other Ultralytics models, SAM 3 weights are not automatically downloaded. You must:
 > 1. Request access on the [SAM 3 model page on Hugging Face](https://huggingface.co/facebook/sam3.1)
 > 2. Once approved, download the `sam3.1_multiplex.pt` file
-> 3. Rename it to `sam3.pt` and place it in the project root
+> 3. Rename it to `sam3.pt` and put it anywhere on disk
 
-The segmentation pipeline looks for `sam3.pt` in the working directory.
+Then point AiT at it using **one** of:
+
+- **GUI** — open the Video Processor and use the **SAM3 Model** *Browse...* button. The path is saved to `~/.ait/config.json` so you only do this once.
+- **CLI** — pass `--sam3_model /path/to/sam3.pt` to `ait-process`.
+- **Project root** — keep `sam3.pt` in the directory you launch `ait` from (legacy dev workflow).
+
+Lookup order at runtime: explicit argument → `~/.ait/config.json` → `./sam3.pt`. If none resolve, AiT prints a clear error showing exactly where it looked.
 
 ### 4. ffmpeg
 
@@ -127,6 +134,7 @@ The Video Processor runs the full detection pipeline on your videos: frame extra
 | **OCR Languages** | Only used with EasyOCR. Space-separated language codes, e.g. `en de` for English and German |
 | **SAM3 Device** | `auto` picks the best available accelerator (CUDA > MPS > CPU). You can force a specific device if needed |
 | **SAM3 Prompt** | The text prompt that guides SAM3 segmentation. The default `"profile image, profile picture"` works well for chat recordings |
+| **SAM3 Model** | Path to the SAM3 checkpoint (`sam3.pt`). Use **Browse...** to pick it once — the path is saved to `~/.ait/config.json` and reused on every launch. Leave blank to fall back to `./sam3.pt` |
 
 ### Processing Options (3)
 

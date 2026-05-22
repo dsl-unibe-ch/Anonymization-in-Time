@@ -21,11 +21,51 @@ except ImportError:
     exit(1)
 
 from ait.utils import resolve_device
+from ait.config import get_sam3_model_path, CONFIG_FILE
 
 
-def setup_predictor(device="auto", model_path="sam3.pt", conf=0.25, half=True):
+def resolve_model_path(model_path=None):
+    """
+    Resolve the SAM3 checkpoint path.
+
+    Lookup order:
+        1. ``model_path`` argument if it points to an existing file
+        2. Saved config (``~/.ait/config.json`` → ``sam3_model_path``)
+        3. ``./sam3.pt`` in the current working directory (legacy behavior)
+
+    Raises FileNotFoundError with instructions if none resolve.
+    """
+    candidates = []
+    if model_path:
+        candidates.append(Path(model_path))
+    saved = get_sam3_model_path()
+    if saved:
+        candidates.append(Path(saved))
+    candidates.append(Path.cwd() / "sam3.pt")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    raise FileNotFoundError(
+        "SAM3 model checkpoint not found.\n\n"
+        "Searched:\n"
+        + "\n".join(f"  - {c}" for c in candidates)
+        + "\n\n"
+        "To fix:\n"
+        "  1. Download `sam3.1_multiplex.pt` from https://huggingface.co/facebook/sam3.1\n"
+        "  2. Rename it to `sam3.pt`\n"
+        "  3. Either:\n"
+        "     - Select it in the Video Processor GUI (SAM3 Model field), or\n"
+        "     - Pass --sam3_model /path/to/sam3.pt to ait-process, or\n"
+        f"     - Edit {CONFIG_FILE} to set `sam3_model_path`\n"
+    )
+
+
+def setup_predictor(device="auto", model_path=None, conf=0.25, half=True):
     """Initialize SAM3 Semantic Predictor with Ultralytics."""
     device = resolve_device(device)
+    resolved_model_path = resolve_model_path(model_path)
 
     if device == "mps":
         device_str = "mps"
@@ -38,7 +78,7 @@ def setup_predictor(device="auto", model_path="sam3.pt", conf=0.25, half=True):
         conf=conf,
         task="segment",
         mode="predict",
-        model=model_path,
+        model=resolved_model_path,
         device=device_str,
         imgsz=644,  # divisible by SAM3 stride (14)
         half=half and device in ["cuda", "mps"],

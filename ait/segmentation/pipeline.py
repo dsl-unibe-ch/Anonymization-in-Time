@@ -125,7 +125,7 @@ def _cleanup_intermediate_pickles(output_folder):
 
 def process_video_sam3(frames_folder, output_folder,
                        text_prompt="profile image, profile picture",
-                       device='auto', model_path="sam3.pt", conf=0.25,
+                       device='auto', model_path=None, conf=0.25,
                        mask_mode='color', blur_strength=51,
                        masks_propagation=True, max_gap=5,
                        save_images=False, pad=10):
@@ -354,7 +354,7 @@ def process_video_sam3(frames_folder, output_folder,
 
 
 def process_videos_sam3_batch(video_folders, text_prompt="profile image, profile picture",
-                              device='auto', model_path="sam3.pt", conf=0.25,
+                              device='auto', model_path=None, conf=0.25,
                               mask_mode='color', blur_strength=51,
                               masks_propagation=True, max_gap=5,
                               save_images=False, pad=10):

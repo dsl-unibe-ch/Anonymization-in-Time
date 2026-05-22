@@ -18,6 +18,7 @@ import os
 import sys
 
 from ait.process_videos import process_single_video, process_multiple_videos
+from ait.config import get_sam3_model_path, set_sam3_model_path
 
 
 class VideoProcessorGUI:
@@ -138,6 +139,15 @@ class VideoProcessorGUI:
         self.sam3_prompt_var = tk.StringVar(value="profile image, profile picture")
         ttk.Entry(params_frame, textvariable=self.sam3_prompt_var, width=40).grid(
             row=2, column=1, columnspan=3, sticky=(tk.W, tk.E), padx=(10, 0), pady=2)
+
+        # SAM3 model checkpoint
+        ttk.Label(params_frame, text="SAM3 Model:").grid(row=3, column=0, sticky=tk.W, pady=2)
+        saved_model = get_sam3_model_path() or ""
+        self.sam3_model_var = tk.StringVar(value=saved_model)
+        sam3_model_entry = ttk.Entry(params_frame, textvariable=self.sam3_model_var)
+        sam3_model_entry.grid(row=3, column=1, columnspan=2, sticky=(tk.W, tk.E), padx=(10, 5), pady=2)
+        ttk.Button(params_frame, text="Browse",
+                   command=self._select_sam3_model).grid(row=3, column=3, sticky=tk.E, pady=2)
         
         # === OPTIONS SECTION ===
         options_frame = ttk.LabelFrame(main_frame, text="Processing Options", padding="10")
@@ -247,6 +257,20 @@ class VideoProcessorGUI:
             self.dict_path = Path(file)
             self.dict_label.config(text=self.dict_path.name, foreground="black")
             self._check_ready()
+
+    def _select_sam3_model(self):
+        """Select SAM3 checkpoint file and persist to config."""
+        filetypes = [("PyTorch checkpoint", "*.pt"), ("All files", "*.*")]
+        current = self.sam3_model_var.get()
+        initialdir = str(Path(current).parent) if current and Path(current).parent.exists() else None
+        file = filedialog.askopenfilename(
+            title="Select SAM3 Model Checkpoint",
+            filetypes=filetypes,
+            initialdir=initialdir,
+        )
+        if file:
+            self.sam3_model_var.set(file)
+            set_sam3_model_path(file)
     
     def _update_video_label(self):
         """Update the video label with count and first filename"""
@@ -300,17 +324,20 @@ class VideoProcessorGUI:
         ocr_engine = self.ocr_engine_var.get()
         sam3_prompt = self.sam3_prompt_var.get()
         sam3_device = self.sam3_device_var.get()
-        
+        sam3_model_path = self.sam3_model_var.get().strip() or None
+        if sam3_model_path:
+            set_sam3_model_path(sam3_model_path)
+
         # Start processing in background thread
         thread = threading.Thread(
             target=self._processing_thread,
-            args=(frame_step, ocr_languages, ocr_engine, sam3_prompt, sam3_device),
+            args=(frame_step, ocr_languages, ocr_engine, sam3_prompt, sam3_device, sam3_model_path),
             daemon=True
         )
         thread.start()
 
     def _processing_thread(self, frame_step, ocr_languages, ocr_engine,
-                          sam3_prompt, sam3_device):
+                          sam3_prompt, sam3_device, sam3_model_path):
         """Background thread for processing videos"""
         # Redirect stdout to log
         import io
@@ -340,6 +367,7 @@ class VideoProcessorGUI:
                     ocr_engine=ocr_engine,
                     sam3_prompt=sam3_prompt,
                     sam3_device=sam3_device,
+                    sam3_model_path=sam3_model_path,
                     frame_step=frame_step,
                     run_ocr=not self.skip_ocr_var.get(),
                     run_sam3=not self.skip_sam3_var.get(),
@@ -355,6 +383,7 @@ class VideoProcessorGUI:
                     ocr_engine=ocr_engine,
                     sam3_prompt=sam3_prompt,
                     sam3_device=sam3_device,
+                    sam3_model_path=sam3_model_path,
                     frame_step=frame_step,
                     run_ocr=not self.skip_ocr_var.get(),
                     run_sam3=not self.skip_sam3_var.get(),

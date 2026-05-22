@@ -84,7 +84,8 @@ def reset_cuda_on_error(device: str | None = None):
 def process_single_video(video_path, output_base_dir, dict_path,
                         ocr_languages=["en", "de"], ocr_workers=4,
                         sam3_prompt="profile image, profile picture", sam3_batch_size=2,
-                        sam3_device='auto', frame_step=1, ocr_engine="doctr",
+                        sam3_device='auto', sam3_model_path=None,
+                        frame_step=1, ocr_engine="doctr",
                         run_ocr=True, run_sam3=True, run_transitions=True,
                         stop_event=None):
     """
@@ -203,6 +204,7 @@ def process_single_video(video_path, output_base_dir, dict_path,
                 output_folder=video_output_dir,
                 text_prompt=sam3_prompt,
                 device=sam3_device_resolved,
+                model_path=sam3_model_path,
                 mask_mode='color',
                 blur_strength=51,
                 masks_propagation=True,
@@ -263,7 +265,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
 def process_multiple_videos(video_paths, output_base_dir, dict_path,
                            ocr_languages=["en", "de"], ocr_workers=4,
                            sam3_prompt="profile image, profile picture", sam3_batch_size=2,
-                           sam3_device='auto', frame_step=1, ocr_engine="doctr",
+                           sam3_device='auto', sam3_model_path=None,
+                           frame_step=1, ocr_engine="doctr",
                            run_ocr=True, run_sam3=True, run_transitions=True,
                            stop_event=None):
     """
@@ -317,6 +320,7 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                 sam3_prompt=sam3_prompt,
                 sam3_batch_size=sam3_batch_size,
                 sam3_device=sam3_device_resolved,
+                sam3_model_path=sam3_model_path,
                 frame_step=frame_step,
                 run_ocr=run_ocr,
                 run_sam3=run_sam3,
@@ -386,7 +390,10 @@ def main():
                        help='Batch size for SAM3 inference (default: 2)')
     parser.add_argument('--sam3_device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'],
                        help='Device for SAM3 (default: auto)')
-    
+    parser.add_argument('--sam3_model', type=str, default=None,
+                       help='Path to SAM3 checkpoint (.pt). If omitted, falls back to '
+                            '~/.ait/config.json then ./sam3.pt')
+
     args = parser.parse_args()
     
     # Validate inputs
@@ -433,6 +440,7 @@ def main():
             sam3_prompt=args.sam3_prompt,
             sam3_batch_size=args.sam3_batch_size,
             sam3_device=args.sam3_device,
+            sam3_model_path=args.sam3_model,
             frame_step=args.frame_step,
             run_ocr=not args.skip_ocr,
             run_sam3=not args.skip_sam3,
@@ -449,6 +457,7 @@ def main():
             sam3_prompt=args.sam3_prompt,
             sam3_batch_size=args.sam3_batch_size,
             sam3_device=args.sam3_device,
+            sam3_model_path=args.sam3_model,
             frame_step=args.frame_step,
             run_ocr=not args.skip_ocr,
             run_sam3=not args.skip_sam3,
