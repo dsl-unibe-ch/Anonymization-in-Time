@@ -54,6 +54,13 @@ pip install anonymization-in-time
 pip install -e .
 ```
 
+With [uv](https://docs.astral.sh/uv/):
+```bash
+uv sync
+```
+
+> **Note (uv users):** SAM3's text prompts require Ultralytics' [CLIP fork](https://github.com/ultralytics/CLIP), which Ultralytics normally installs at runtime via pip — this fails in uv-managed environments, which don't include pip. `uv sync` installs it automatically (it's in the `dev` dependency group). If you install the package from PyPI with uv instead, add it explicitly, e.g. `uv tool install anonymization-in-time --with git+https://github.com/ultralytics/CLIP.git`.
+
 ### 3. SAM3 model weights
 
 

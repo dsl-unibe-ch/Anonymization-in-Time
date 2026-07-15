@@ -46,11 +46,21 @@ dependencies = [
     "ultralytics>=8.0.114",
     "scikit-learn>=1.4.0",
     "pycocotools>=2.0.6",
+    "timm>=1.0.0",
 ]
 
 [project.optional-dependencies]
 build = [
     "pyinstaller>=6.0.0",
+]
+
+# Ultralytics' SAM3 text prompts need their CLIP fork, which it normally
+# pip-installs at runtime — impossible in pip-less uv venvs. A dependency
+# group (not published metadata, so PyPI accepts the git URL) lets
+# `uv sync` install it up front.
+[dependency-groups]
+dev = [
+    "clip @ git+https://github.com/ultralytics/CLIP.git",
 ]
 
 [project.urls]
