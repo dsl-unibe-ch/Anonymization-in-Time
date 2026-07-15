@@ -34,6 +34,7 @@ from ait.utils import extract_video_frames, export_ocr_text_timeline, resolve_de
 from ait.ocr import process_video_ocr, process_videos_batch
 from ait.segmentation import process_video_sam3, process_videos_sam3_batch
 from ait.transition_detection import detect_scene_transitions
+from ait.video_discovery import discover_videos, plan_output_paths
 
 
 def cleanup_gpu_memory(device: str | None = None):
@@ -87,7 +88,7 @@ def process_single_video(video_path, output_base_dir, dict_path,
                         sam3_device='auto', sam3_model_path=None,
                         frame_step=1, ocr_engine="doctr",
                         run_ocr=True, run_sam3=True, run_transitions=True,
-                        stop_event=None):
+                        stop_event=None, output_name=None):
     """
     Process a single video through the complete pipeline.
 
@@ -105,18 +106,26 @@ def process_single_video(video_path, output_base_dir, dict_path,
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
+        output_name (str): Explicit output subdirectory path (may contain
+            ``/`` separators to mirror the source tree). When omitted, falls
+            back to the legacy ``video_path.stem`` folder. Callers pass an
+            explicit path to mirror the input folder structure and to keep two
+            same-stem videos from silently sharing one output folder (see
+            ``ait.video_discovery.plan_output_paths``).
 
     Returns:
         dict: Results containing paths to all generated files
     """
     video_path = Path(video_path)
     output_base_dir = Path(output_base_dir)
-    
+
     # Resolve accelerator once for the full video
     sam3_device_resolved = resolve_device(sam3_device)
-    
-    # Create video-specific output directory
-    video_name = video_path.stem
+
+    # Create video-specific output directory. Use the explicit output_name when
+    # provided (a tree-mirroring, collision-safe subpath); otherwise keep the
+    # legacy per-stem folder so existing layouts are preserved.
+    video_name = output_name if output_name else video_path.stem
     video_output_dir = output_base_dir / video_name
     video_output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -268,7 +277,7 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                            sam3_device='auto', sam3_model_path=None,
                            frame_step=1, ocr_engine="doctr",
                            run_ocr=True, run_sam3=True, run_transitions=True,
-                           stop_event=None):
+                           stop_event=None, output_names=None):
     """
     Process multiple videos through the complete pipeline.
     
@@ -286,6 +295,9 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
+        output_names (list): Optional per-video output subdirectory paths
+            (tree-mirroring, may contain ``/``), parallel to ``video_paths``.
+            When omitted, each video falls back to the legacy per-stem folder.
     Returns:
         list: List of result dictionaries for each video
     """
@@ -326,6 +338,7 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
                 run_sam3=run_sam3,
                 run_transitions=run_transitions,
                 stop_event=stop_event,
+                output_name=output_names[idx] if output_names else None,
             )
             all_results.append(result)
         except Exception as e:
@@ -405,6 +418,7 @@ def main():
     
     # Collect video paths
     video_paths = []
+    output_names = None
     if args.video:
         video_path = Path(args.video)
         if not video_path.exists():
@@ -416,16 +430,20 @@ def main():
         if not video_folder.exists():
             print(f"Error: Video folder not found: {video_folder}")
             return
-        # Find all video files
-        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm']
-        for ext in video_extensions:
-            video_paths.extend(video_folder.glob(f'*{ext}'))
-            video_paths.extend(video_folder.glob(f'*{ext.upper()}'))
-        
+        # Find all video files recursively (arbitrary nesting depth).
+        video_paths = discover_videos(video_folder)
+
         if not video_paths:
             print(f"Error: No video files found in {video_folder}")
             return
-    
+
+        # Plan tree-mirroring, collision-safe output subpaths so the output
+        # directory reproduces the input folder structure and two nested videos
+        # with the same stem never silently share one output directory.
+        assignments = plan_output_paths(video_paths, video_folder)
+        video_paths = [p for p, _ in assignments]
+        output_names = [name for _, name in assignments]
+
     print(f"Found {len(video_paths)} video(s) to process")
     
     # Process videos
@@ -462,6 +480,7 @@ def main():
             run_ocr=not args.skip_ocr,
             run_sam3=not args.skip_sam3,
             run_transitions=not args.skip_transitions,
+            output_names=output_names,
         )
 
 

@@ -161,12 +161,50 @@ def load_transitions(video_dir):
     return transitions
 
 
-def export_anonymized_video(video_dir, output_video_path, blur_strength=51, 
+def resolve_sam3_file(video_dir, sam3_source="auto"):
+    """
+    Pick which SAM3 pickle to load when there is no reviewed state.pkl.
+
+    Args:
+        video_dir (Path): Processed video directory
+        sam3_source (str): 'original', 'circular', or 'auto'. In auto mode the
+            choice recorded by the annotation viewer (mask_choice.txt) wins,
+            then sam3.pkl, then sam3_circular.pkl if it is the only one there.
+
+    Returns:
+        Path to the SAM3 pickle to use (may not exist).
+    """
+    video_dir = Path(video_dir)
+    sam3_file = video_dir / "sam3.pkl"
+    sam3_circular_file = video_dir / "sam3_circular.pkl"
+
+    if sam3_source == "circular":
+        return sam3_circular_file
+    if sam3_source == "original":
+        return sam3_file
+
+    choice_file = video_dir / "mask_choice.txt"
+    if choice_file.exists():
+        try:
+            choice = choice_file.read_text().strip().lower()
+        except OSError:
+            choice = ""
+        if choice == "circular" and sam3_circular_file.exists():
+            return sam3_circular_file
+        if choice == "original" and sam3_file.exists():
+            return sam3_file
+    if not sam3_file.exists() and sam3_circular_file.exists():
+        return sam3_circular_file
+    return sam3_file
+
+
+def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
                            ocr_blur=True, sam3_blur=True, transition_blur=True,
-                           fps=None, codec='mp4v', font_path=None):
+                           fps=None, codec='mp4v', font_path=None,
+                           sam3_source='auto'):
     """
     Export an anonymized video with blurring applied to reviewed annotations.
-    
+
     Args:
         video_dir (str or Path): Directory containing frames/, state.pkl (or ocr.pkl/sam3.pkl), transitions.txt
         output_video_path (str or Path): Path for output video file
@@ -177,12 +215,16 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
         fps (float): Output video FPS (default: auto-detect from frames)
         codec (str): Video codec fourcc code (default: 'mp4v')
         font_path (str): Path to custom font file (default: auto-detect MYRIADPRO-REGULAR.OTF)
+        sam3_source (str): Which SAM3 masks to use when no state.pkl exists:
+            'original' (sam3.pkl), 'circular' (sam3_circular.pkl), or 'auto'
+            (follow the choice made in the annotation viewer, if recorded).
+            Ignored when state.pkl exists — its masks are already the reviewed ones.
     """
     video_dir = Path(video_dir)
     frames_dir = video_dir / "frames"
     state_file = video_dir / "state.pkl"
     ocr_file = video_dir / "ocr.pkl"
-    sam3_file = video_dir / "sam3.pkl"
+    sam3_file = resolve_sam3_file(video_dir, sam3_source)
     
     # Auto-detect font file if not provided
     if font_path is None:
@@ -230,6 +272,9 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
     
     # Prefer state.pkl (reviewed annotations) over original files
     if state_file.exists():
+        if sam3_source in ("original", "circular"):
+            print(f"Note: --masks {sam3_source} ignored — state.pkl contains "
+                  f"the masks reviewed in the annotation viewer.")
         print(f"Loading reviewed annotations from state.pkl...")
         with open(state_file, 'rb') as f:
             all_annotations = pickle.load(f)
@@ -261,7 +306,8 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
         if sam3_blur and sam3_file.exists():
             with open(sam3_file, 'rb') as f:
                 sam3_annotations = pickle.load(f)
-            print(f"Loaded SAM3 annotations: {len(sam3_annotations)} frames")
+            print(f"Loaded SAM3 annotations from {sam3_file.name}: "
+                  f"{len(sam3_annotations)} frames")
     
     # Load transitions
     transitions = []
@@ -436,6 +482,11 @@ def main():
                        help='Skip SAM3 mask blurring')
     parser.add_argument('--no_transitions', action='store_true',
                        help='Skip transition frame blurring')
+    parser.add_argument('--masks', type=str, default='auto',
+                       choices=['auto', 'original', 'circular'],
+                       help='Which SAM3 masks to use when no state.pkl exists: '
+                            'original (sam3.pkl), circular (sam3_circular.pkl), '
+                            'or auto (follow the annotation viewer choice, default)')
     
     args = parser.parse_args()
     
@@ -453,7 +504,8 @@ def main():
             sam3_blur=not args.no_sam3,
             transition_blur=not args.no_transitions,
             fps=args.fps,
-            codec=args.codec
+            codec=args.codec,
+            sam3_source=args.masks
         )
     except Exception as e:
         print(f"\nError: {str(e)}")

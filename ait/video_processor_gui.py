@@ -18,7 +18,13 @@ import os
 import sys
 
 from ait.process_videos import process_single_video, process_multiple_videos
-from ait.config import get_sam3_model_path, set_sam3_model_path
+from ait.config import (
+    get_sam3_model_path,
+    set_sam3_model_path,
+    get_last_browse_dir,
+    set_last_browse_dir,
+)
+from ait.video_discovery import discover_videos, plan_output_paths
 
 
 class VideoProcessorGUI:
@@ -29,6 +35,11 @@ class VideoProcessorGUI:
         
         # State
         self.video_paths = []
+        # Optional per-video output subdirectory paths (parallel to
+        # self.video_paths) planned to mirror the source tree collision-safely.
+        self.output_names = None
+        # Root of the selected source folder (for tree-mirroring output).
+        self.source_root = None
         self.output_dir = None
         self.dict_path = None
         self.processing = False
@@ -206,7 +217,11 @@ class VideoProcessorGUI:
             ("Video files", "*.mp4 *.avi *.mov *.mkv *.flv *.wmv *.webm"),
             ("All files", "*.*")
         ]
-        files = filedialog.askopenfilenames(title="Select Video Files", filetypes=filetypes)
+        files = filedialog.askopenfilenames(
+            title="Select Video Files",
+            filetypes=filetypes,
+            initialdir=get_last_browse_dir(),
+        )
         if files:
             # Handle both tuple and space-separated string (Windows quirk)
             if isinstance(files, str):
@@ -214,6 +229,9 @@ class VideoProcessorGUI:
                 files = self.root.tk.splitlist(files)
             
             self.video_paths = [Path(f) for f in files]
+            # Individually picked files keep the legacy per-stem output naming.
+            self.output_names = None
+            set_last_browse_dir(self.video_paths[0].parent)
             print(f"Selected {len(self.video_paths)} video file(s):")
             for vp in self.video_paths:
                 print(f"  - {vp}")
@@ -221,40 +239,56 @@ class VideoProcessorGUI:
             self._check_ready()
     
     def _select_video_folder(self):
-        """Select folder containing videos"""
-        folder = filedialog.askdirectory(title="Select Video Folder")
+        """Select folder containing videos (searched recursively)"""
+        folder = filedialog.askdirectory(
+            title="Select Video Folder",
+            initialdir=get_last_browse_dir(),
+        )
         if folder:
             folder_path = Path(folder)
-            # Find all video files
-            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm']
-            self.video_paths = []
-            for ext in video_extensions:
-                self.video_paths.extend(folder_path.glob(f'*{ext}'))
-                self.video_paths.extend(folder_path.glob(f'*{ext.upper()}'))
-            # Sort alphabetically so processing order is predictable
-            # (e.g., 06-LAET-001, 06-LAET-002, 06-LAET-003, ...)
-            self.video_paths.sort(key=lambda p: p.name.lower())
+            set_last_browse_dir(folder_path)
+            # Remember the source root so the output tree can mirror it.
+            self.source_root = folder_path
+            # Find all video files recursively through nested folders. Order is
+            # deterministic by path relative to the selected folder.
+            self.video_paths = discover_videos(folder_path)
 
             if self.video_paths:
+                # Plan tree-mirroring, collision-safe output subpaths so the
+                # output reproduces the source folder structure and two nested
+                # videos with the same stem never share one output folder.
+                assignments = plan_output_paths(self.video_paths, folder_path)
+                self.video_paths = [p for p, _ in assignments]
+                self.output_names = [name for _, name in assignments]
                 self._update_video_label()
                 self._check_ready()
             else:
+                self.output_names = None
                 messagebox.showwarning("No Videos", "No video files found in the selected folder")
-    
+
     def _select_output_dir(self):
         """Select output directory"""
-        folder = filedialog.askdirectory(title="Select Output Directory")
+        folder = filedialog.askdirectory(
+            title="Select Output Directory",
+            initialdir=get_last_browse_dir(),
+        )
         if folder:
             self.output_dir = Path(folder)
+            set_last_browse_dir(self.output_dir)
             self.output_label.config(text=str(self.output_dir), foreground="black")
             self._check_ready()
-    
+
     def _select_dict_file(self):
         """Select dictionary JSON file"""
         filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
-        file = filedialog.askopenfilename(title="Select Names Dictionary", filetypes=filetypes)
+        file = filedialog.askopenfilename(
+            title="Select Names Dictionary",
+            filetypes=filetypes,
+            initialdir=get_last_browse_dir(),
+        )
         if file:
             self.dict_path = Path(file)
+            set_last_browse_dir(self.dict_path.parent)
             self.dict_label.config(text=self.dict_path.name, foreground="black")
             self._check_ready()
 
@@ -373,6 +407,7 @@ class VideoProcessorGUI:
                     run_sam3=not self.skip_sam3_var.get(),
                     run_transitions=not self.skip_transitions_var.get(),
                     stop_event=self._stop_event,
+                    output_name=self.output_names[0] if self.output_names else None,
                 )
             else:
                 process_multiple_videos(
@@ -389,6 +424,7 @@ class VideoProcessorGUI:
                     run_sam3=not self.skip_sam3_var.get(),
                     run_transitions=not self.skip_transitions_var.get(),
                     stop_event=self._stop_event,
+                    output_names=self.output_names,
                 )
 
             if self._stop_event.is_set():

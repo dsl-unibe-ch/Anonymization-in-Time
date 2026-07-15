@@ -4,9 +4,9 @@ Video anonymization tool for chat recordings. Detects names (OCR) and profile pi
 
 ## Features
 
-- **Processing pipeline**: Frame extraction, OCR text detection, SAM3 segmentation, scene transition detection
+- **Processing pipeline**: Frame extraction, OCR text detection, SAM3 segmentation, scene transition detection. Folder input is searched **recursively** and the output **mirrors the source folder tree** (same-named videos in different subfolders stay separate)
 - **Annotation viewer**: Navigate frames, toggle annotation visibility, preview hidden annotations on hover
-- **Video export**: Apply Gaussian blur to visible annotations for anonymization
+- **Video export**: Apply Gaussian blur to visible annotations for anonymization, with a **sequential export queue** for batching multiple videos
 - **Cross-platform**: Works on Windows, Mac, and Linux
 
 ## Project Structure
@@ -53,6 +53,13 @@ pip install anonymization-in-time
 ```bash
 pip install -e .
 ```
+
+With [uv](https://docs.astral.sh/uv/):
+```bash
+uv sync
+```
+
+> **Note (uv users):** SAM3's text prompts require Ultralytics' [CLIP fork](https://github.com/ultralytics/CLIP), which Ultralytics normally installs at runtime via pip — this fails in uv-managed environments, which don't include pip. `uv sync` installs it automatically (it's in the `dev` dependency group). If you install the package from PyPI with uv instead, add it explicitly, e.g. `uv tool install anonymization-in-time --with git+https://github.com/ultralytics/CLIP.git`.
 
 ### 3. SAM3 model weights
 
@@ -107,7 +114,7 @@ The `ait` command opens the AiT launcher — the central hub for the three tools
 
 - **Video Processor** — runs the detection pipeline on your video files. Click **Launch Video Processor** to open it.
 - **Annotation Viewer** — lets you review and refine detections before exporting. Select a processed video folder first, then click **Launch Annotation Viewer**.
-- **Export Anonymized Video** — exports the final video with blur applied. Set the **Blur Strength** (Gaussian kernel size, odd number between 3 and 201 — higher means stronger blur, default 51), select a processed folder, and click **Export Video**.
+- **Export Queue** — exports one or more reviewed videos with blur applied, running them **sequentially** (one at a time). Set the **Blur Strength** (Gaussian kernel size, odd number between 3 and 201 — higher means stronger blur, default 51), then **Add to Queue…** — point it at a single processed folder or a parent holding many (e.g. a mirrored output tree) to enqueue them all at once. See [Export Queue](#export-queue) below for the full workflow.
 
 ---
 
@@ -121,8 +128,8 @@ The Video Processor runs the full detection pipeline on your videos: frame extra
 
 | Field | Description |
 |-------|-------------|
-| **Videos** | Select individual video files or a folder containing videos. Supported formats: `.mp4`, `.avi`, `.mov`, `.mkv`, `.webm` |
-| **Output Dir** | Where processed results are saved. Each video gets its own subfolder with extracted frames, `ocr.pkl`, and `sam3.pkl` |
+| **Videos** | Select individual video files or a folder containing videos. **Select Folder** searches the folder **recursively** through nested subfolders at any depth, so you can point it at a whole project tree. Supported formats (case-insensitive): `.mp4`, `.avi`, `.mov`, `.mkv`, `.flv`, `.wmv`, `.webm`. Videos are processed in a deterministic order based on their path relative to the selected folder |
+| **Output Dir** | Where processed results are saved. The output **mirrors the source folder tree**: a video at `a/b/clip.mp4` (relative to the selected folder) produces its pipeline files under `a/b/clip/` inside the output dir, each folder holding extracted frames, `ocr.pkl`, and `sam3.pkl`. Because the folder structure is reproduced, two same‑named videos in different subfolders never share or overwrite one output folder. Individually picked files (not a folder) keep a flat per‑stem folder |
 | **Names Dict** | A JSON file mapping real names to pseudonyms (alteregos). Format: `{"Real Name": "Fake Name"}`. Names with an empty string `""` are detected and the text box blurred, but no alterego name is drawn on top |
 
 ### Processing Parameters (2)
@@ -211,3 +218,45 @@ Use the **Transitions** menu to list (4.1) all transitions or save them.
 | **Save State** | `S` / `Ctrl+S` | Save visibility toggles and transition ranges so you can resume later |
 | **Export Visibility** | — | Export the visibility state as a standalone pickle file |
 | **Export Anonymized Video** | — | Available from the **File** menu (6.1). Exports the video with Gaussian blur applied to all visible annotations and full blur on transition frames |
+
+---
+
+## Export Queue
+
+The launcher's **Export Queue** lets you export several processed videos in one session. Jobs run **sequentially — at most one export process runs at a time** — and the UI stays responsive throughout (the queue is polled on the Tkinter event loop rather than blocking).
+
+### Adding jobs
+
+1. Set the **Blur Strength** (odd number, 3–201). The value is **captured per job at the moment you add it**, so you can queue different strengths for different videos.
+2. Click **Add to Queue…** and pick a folder. This can be a **single processed video folder** or a **parent holding several** (e.g. a whole mirrored output tree) — every pipeline folder found underneath is offered for enqueue.
+3. A folder counts as a pipeline folder if it contains a `frames/` subdirectory **and** at least one of `state.pkl`, `ocr.pkl`, `sam3.pkl`, or `sam3_circular.pkl`.
+
+**Output paths default automatically** to `<folder>_anonymized.mp4` right next to each pipeline folder, so you don't have to navigate a save dialog for every video — you can override the path when adding a single folder.
+
+**SAM3 masks**: when a folder has both original (`sam3.pkl`) and circular (`sam3_circular.pkl`) masks, you choose which to export. The choice defaults to whatever you selected for that video in the Annotation Viewer (recorded in `mask_choice.txt`). If the folder has reviewed annotations (`state.pkl`), those masks are used and the toggle is disabled.
+
+**Delete after export**: the add dialog has an optional **Delete pipeline folder after successful export** checkbox. When enabled, the processed folder (frames + pickles) is removed once its export finishes successfully — handy for reclaiming disk after producing the final video. It is **never** deleted on failure or cancellation.
+
+Each queued job shows its **source folder**, **output file**, **blur**, **masks** (`reviewed`/`original`/`circular`), **del** (whether it will be deleted), and **status**.
+
+**Duplicates are rejected** with a message: you cannot queue the same source folder twice, and you cannot point two jobs at the same output file. This keeps every export destination explicit and non-conflicting. (Overwriting a pre-existing file on disk still goes through the normal save-dialog confirmation.)
+
+### Controls
+
+| Control | Behavior |
+|---------|----------|
+| **Add to Queue…** | Validate and enqueue a new job (see above) |
+| **Start Queue** | Begin exporting pending jobs in order. Disabled while an export is already running or when there is nothing pending |
+| **Cancel Active** | Stop the export that is currently running (marked **cancelled**). Remaining **pending jobs continue** automatically |
+| **Remove Selected** | Remove a selected **pending** job. Running or finished jobs cannot be removed |
+| **Clear Pending** | Drop all pending jobs, leaving any running or finished jobs untouched |
+
+### Status and failures
+
+Each job ends in one of: **succeeded**, **failed**, or **cancelled**; a live aggregate summary is shown beneath the table. Failures are **isolated to the individual job** — if an export fails to launch or its process exits with a non-zero code, that job is marked **failed** and the queue automatically advances to the next pending job.
+
+### Cancellation and closing
+
+- **Cancel Active** stops only the running export and then continues with the remaining pending jobs.
+- Closing the launcher while exports are running or pending prompts for confirmation. On confirmation, the active export process is terminated and all pending jobs are cancelled **before** the window closes, so no export process or hidden queue is left running in the background.
+- Separately launched **Video Processor** and **Annotation Viewer** windows are independent processes; closing the launcher warns about them but does not force them to close.
