@@ -4,7 +4,7 @@ Video anonymization tool for chat recordings. Detects names (OCR) and profile pi
 
 ## Features
 
-- **Processing pipeline**: Frame extraction, OCR text detection, SAM3 segmentation, scene transition detection. Folder input is searched **recursively** and same-named videos get collision-safe output folders
+- **Processing pipeline**: Frame extraction, OCR text detection, SAM3 segmentation, scene transition detection. Folder input is searched **recursively** and the output **mirrors the source folder tree** (same-named videos in different subfolders stay separate)
 - **Annotation viewer**: Navigate frames, toggle annotation visibility, preview hidden annotations on hover
 - **Video export**: Apply Gaussian blur to visible annotations for anonymization, with a **sequential export queue** for batching multiple videos
 - **Cross-platform**: Works on Windows, Mac, and Linux
@@ -114,7 +114,7 @@ The `ait` command opens the AiT launcher — the central hub for the three tools
 
 - **Video Processor** — runs the detection pipeline on your video files. Click **Launch Video Processor** to open it.
 - **Annotation Viewer** — lets you review and refine detections before exporting. Select a processed video folder first, then click **Launch Annotation Viewer**.
-- **Export Queue** — exports one or more reviewed videos with blur applied, running them **sequentially** (one at a time). Set the **Blur Strength** (Gaussian kernel size, odd number between 3 and 201 — higher means stronger blur, default 51), then **Add to Queue…** each processed folder with its output file. See [Export Queue](#export-queue) below for the full workflow.
+- **Export Queue** — exports one or more reviewed videos with blur applied, running them **sequentially** (one at a time). Set the **Blur Strength** (Gaussian kernel size, odd number between 3 and 201 — higher means stronger blur, default 51), then **Add to Queue…** — point it at a single processed folder or a parent holding many (e.g. a mirrored output tree) to enqueue them all at once. See [Export Queue](#export-queue) below for the full workflow.
 
 ---
 
@@ -129,7 +129,7 @@ The Video Processor runs the full detection pipeline on your videos: frame extra
 | Field | Description |
 |-------|-------------|
 | **Videos** | Select individual video files or a folder containing videos. **Select Folder** searches the folder **recursively** through nested subfolders at any depth, so you can point it at a whole project tree. Supported formats (case-insensitive): `.mp4`, `.avi`, `.mov`, `.mkv`, `.flv`, `.wmv`, `.webm`. Videos are processed in a deterministic order based on their path relative to the selected folder |
-| **Output Dir** | Where processed results are saved. Each video gets its own subfolder with extracted frames, `ocr.pkl`, and `sam3.pkl`. By default the subfolder is named after the video's filename (its stem). If two discovered videos in different subfolders share the same filename, the colliding ones instead get a deterministic name derived from their relative path (e.g. `group-a__clip` and `group-b__clip`) so they never silently overwrite each other. Uniquely‑named videos keep the original stem folder |
+| **Output Dir** | Where processed results are saved. The output **mirrors the source folder tree**: a video at `a/b/clip.mp4` (relative to the selected folder) produces its pipeline files under `a/b/clip/` inside the output dir, each folder holding extracted frames, `ocr.pkl`, and `sam3.pkl`. Because the folder structure is reproduced, two same‑named videos in different subfolders never share or overwrite one output folder. Individually picked files (not a folder) keep a flat per‑stem folder |
 | **Names Dict** | A JSON file mapping real names to pseudonyms (alteregos). Format: `{"Real Name": "Fake Name"}`. Names with an empty string `""` are detected and the text box blurred, but no alterego name is drawn on top |
 
 ### Processing Parameters (2)
@@ -228,10 +228,16 @@ The launcher's **Export Queue** lets you export several processed videos in one 
 ### Adding jobs
 
 1. Set the **Blur Strength** (odd number, 3–201). The value is **captured per job at the moment you add it**, so you can queue different strengths for different videos.
-2. Click **Add to Queue…**, pick a processed video folder, then choose the output video file.
-3. A folder is only accepted if it contains a `frames/` subdirectory **and** at least one of `state.pkl`, `ocr.pkl`, or `sam3.pkl`.
+2. Click **Add to Queue…** and pick a folder. This can be a **single processed video folder** or a **parent holding several** (e.g. a whole mirrored output tree) — every pipeline folder found underneath is offered for enqueue.
+3. A folder counts as a pipeline folder if it contains a `frames/` subdirectory **and** at least one of `state.pkl`, `ocr.pkl`, `sam3.pkl`, or `sam3_circular.pkl`.
 
-Each queued job shows its **source folder**, **output file**, **blur**, and **status**.
+**Output paths default automatically** to `<folder>_anonymized.mp4` right next to each pipeline folder, so you don't have to navigate a save dialog for every video — you can override the path when adding a single folder.
+
+**SAM3 masks**: when a folder has both original (`sam3.pkl`) and circular (`sam3_circular.pkl`) masks, you choose which to export. The choice defaults to whatever you selected for that video in the Annotation Viewer (recorded in `mask_choice.txt`). If the folder has reviewed annotations (`state.pkl`), those masks are used and the toggle is disabled.
+
+**Delete after export**: the add dialog has an optional **Delete pipeline folder after successful export** checkbox. When enabled, the processed folder (frames + pickles) is removed once its export finishes successfully — handy for reclaiming disk after producing the final video. It is **never** deleted on failure or cancellation.
+
+Each queued job shows its **source folder**, **output file**, **blur**, **masks** (`reviewed`/`original`/`circular`), **del** (whether it will be deleted), and **status**.
 
 **Duplicates are rejected** with a message: you cannot queue the same source folder twice, and you cannot point two jobs at the same output file. This keeps every export destination explicit and non-conflicting. (Overwriting a pre-existing file on disk still goes through the normal save-dialog confirmation.)
 

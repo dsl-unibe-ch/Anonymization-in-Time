@@ -243,6 +243,7 @@ class MainWindow:
         sam_path = self.data_dir / "sam3.pkl"
         sam_circular_path = self.data_dir / "sam3_circular.pkl"
         sam_choice = None
+        mask_choice = None  # recorded so exports default to the same masks
 
         if not combined_path.exists():
             if sam_path.exists() and sam_circular_path.exists():
@@ -256,8 +257,12 @@ class MainWindow:
                     self._update_status("Load cancelled")
                     return
                 sam_choice = sam_circular_path if use_circular else sam_path
+                mask_choice = "circular" if use_circular else "original"
             elif sam_circular_path.exists() and not sam_path.exists():
                 sam_choice = sam_circular_path
+                mask_choice = "circular"
+            elif sam_path.exists():
+                mask_choice = "original"
 
         if not self.annotation_manager.load_annotations(sam_path_override=sam_choice):
             messagebox.showwarning(
@@ -269,7 +274,13 @@ class MainWindow:
                 "- data/ocr.pkl and/or data/sam3_circular.pkl (separate)"
             )
             return
-        
+
+        if mask_choice is not None:
+            try:
+                (self.data_dir / "mask_choice.txt").write_text(mask_choice + "\n")
+            except OSError as e:
+                print(f"Warning: could not record mask choice: {e}")
+
         # Load transitions
         self.transition_manager.load_transitions()  # Non-fatal if file doesn't exist
         

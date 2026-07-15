@@ -8,7 +8,7 @@ from ait.video_discovery import (
     SUPPORTED_VIDEO_EXTENSIONS,
     discover_videos,
     is_supported_video,
-    plan_output_names,
+    plan_output_paths,
 )
 
 
@@ -100,7 +100,7 @@ class DiscoverVideosTest(unittest.TestCase):
             self.assertIn(ext, SUPPORTED_VIDEO_EXTENSIONS)
 
 
-class PlanOutputNamesTest(unittest.TestCase):
+class PlanOutputPathsTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
@@ -114,55 +114,53 @@ class PlanOutputNamesTest(unittest.TestCase):
         path.write_bytes(b"")
         return path
 
-    def test_unique_stems_keep_legacy_naming(self):
+    def test_mirrors_source_tree(self):
         paths = [
             self._touch("group-a/alpha.mp4"),
-            self._touch("group-b/beta.mp4"),
+            self._touch("group-b/nested/beta.mp4"),
             self._touch("gamma.mp4"),
         ]
-        assignments = dict(plan_output_names(paths, self.root))
-        self.assertEqual(assignments[paths[0]], "alpha")
-        self.assertEqual(assignments[paths[1]], "beta")
+        assignments = dict(plan_output_paths(paths, self.root))
+        self.assertEqual(assignments[paths[0]], "group-a/alpha")
+        self.assertEqual(assignments[paths[1]], "group-b/nested/beta")
         self.assertEqual(assignments[paths[2]], "gamma")
 
-    def test_duplicate_stems_get_distinct_names(self):
+    def test_same_stem_different_folders_keep_their_paths(self):
         p1 = self._touch("group-a/clip.mp4")
         p2 = self._touch("group-b/clip.mp4")
-        assignments = dict(plan_output_names([p1, p2], self.root))
-        self.assertNotEqual(assignments[p1], assignments[p2])
-        # Derived names are relative-path-based and readable.
-        self.assertEqual(assignments[p1], "group-a__clip")
-        self.assertEqual(assignments[p2], "group-b__clip")
+        assignments = dict(plan_output_paths([p1, p2], self.root))
+        self.assertEqual(assignments[p1], "group-a/clip")
+        self.assertEqual(assignments[p2], "group-b/clip")
 
-    def test_duplicate_stems_never_share_output_dir(self):
-        # Three same-stem videos at different depths.
+    def test_same_stem_at_different_depths_never_collide(self):
         p1 = self._touch("clip.mp4")
         p2 = self._touch("a/clip.mp4")
         p3 = self._touch("a/b/clip.mp4")
-        names = [name for _, name in plan_output_names([p1, p2, p3], self.root)]
+        names = [name for _, name in plan_output_paths([p1, p2, p3], self.root)]
         self.assertEqual(len(set(names)), 3)
 
     def test_same_stem_different_extension_disambiguated(self):
-        # Same folder, same stem, different extensions -> derived names collide
-        # before the digest fallback kicks in; result must still be distinct.
+        # Same folder, same stem, different extensions -> subpaths would
+        # collide; result must still be distinct.
         p1 = self._touch("clip.mp4")
         p2 = self._touch("clip.mov")
-        names = [name for _, name in plan_output_names([p1, p2], self.root)]
+        names = [name for _, name in plan_output_paths([p1, p2], self.root)]
         self.assertEqual(len(set(n.casefold() for n in names)), 2)
 
-    def test_names_are_filesystem_safe(self):
+    def test_path_components_are_filesystem_safe(self):
         p1 = self._touch("odd dir/weird:name.mp4")
-        p2 = self._touch("other/weird:name.mp4")
-        names = [name for _, name in plan_output_names([p1, p2], self.root)]
+        names = [name for _, name in plan_output_paths([p1], self.root)]
         for name in names:
-            for bad in '/\\:*?"<>| ':
-                self.assertNotIn(bad, name)
+            # Slash is the allowed subpath separator; each component is safe.
+            for component in name.split("/"):
+                for bad in '\\:*?"<>| ':
+                    self.assertNotIn(bad, component)
 
     def test_deterministic_regardless_of_input_order(self):
         p1 = self._touch("a/clip.mp4")
         p2 = self._touch("b/clip.mp4")
-        first = dict(plan_output_names([p1, p2], self.root))
-        second = dict(plan_output_names([p2, p1], self.root))
+        first = dict(plan_output_paths([p1, p2], self.root))
+        second = dict(plan_output_paths([p2, p1], self.root))
         self.assertEqual(first[p1], second[p1])
         self.assertEqual(first[p2], second[p2])
 

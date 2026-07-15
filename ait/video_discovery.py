@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections import Counter
 from pathlib import Path
 
 # Supported video container extensions (compared case-insensitively).
@@ -90,57 +89,53 @@ def _sanitize(part: str) -> str:
     return cleaned or "_"
 
 
-def _relative_output_name(path: Path, root) -> str:
-    """Build an extension-free, filesystem-safe name from the relative path."""
-    parts = list(_relative_parts(Path(path), root))
-    if parts:
-        parts[-1] = Path(parts[-1]).stem  # drop the extension from the file part
-    tokens = [_sanitize(p) for p in parts if p not in ("", ".", "..")]
-    return "__".join(t for t in tokens if t) or _sanitize(Path(path).stem)
-
-
 def _short_digest(path: Path, root, salt: str = "") -> str:
     rel = "/".join(_relative_parts(Path(path), root)) or str(path)
     return hashlib.sha1((rel + "\0" + salt).encode("utf-8")).hexdigest()[:8]
 
 
-def plan_output_names(video_paths, root=None) -> list:
-    """Assign each video a collision-free output subdirectory name.
+def _relative_output_parts(path: Path, root) -> list:
+    """Sanitized relative path components with the extension dropped."""
+    parts = list(_relative_parts(Path(path), root))
+    if parts:
+        parts[-1] = Path(parts[-1]).stem  # drop the extension from the file part
+    tokens = [_sanitize(p) for p in parts if p not in ("", ".", "..")]
+    tokens = [t for t in tokens if t]
+    return tokens or [_sanitize(Path(path).stem)]
 
-    Returns a list of ``(video_path, output_name)`` tuples in the same order as
-    ``video_paths``. Unique stems keep their legacy ``<stem>`` folder name so
-    existing layouts are preserved. Only videos whose stem collides with another
-    video receive deterministic, relative-path-derived names, with a stable
-    digest fallback when sanitization or case-folding would still collide.
+
+def plan_output_paths(video_paths, root=None) -> list:
+    """Assign each video a collision-free output subpath mirroring the tree.
+
+    Returns a list of ``(video_path, output_subpath)`` tuples in the same
+    order as ``video_paths``. Each subpath reproduces the video's folder
+    structure relative to ``root`` and ends in a directory named after the
+    video (extension dropped), e.g. ``a/b/clip.mp4`` -> ``a/b/clip``. Subpaths
+    use ``/`` separators; ``pathlib`` accepts them on every platform.
+
+    Collisions (same stem in the same folder with different extensions, or
+    names that only differ in case/sanitized characters) are disambiguated
+    with the sanitized extension, then a stable digest as a last resort.
     """
     paths = [Path(p) for p in video_paths]
-
-    # Detect stem collisions case-insensitively: output directories may live on
-    # a case-insensitive filesystem where ``Clip`` and ``clip`` are the same.
-    stem_counts = Counter(p.stem.casefold() for p in paths)
-
-    used = {}  # casefolded final name -> path it was assigned to
+    used = {}  # casefolded final subpath -> path it was assigned to
     assignments = [None] * len(paths)
 
-    # First pass: assign legacy stem names to unique stems (priority).
     for idx, path in enumerate(paths):
-        if stem_counts[path.stem.casefold()] == 1:
-            name = path.stem
-            used[name.casefold()] = path
-            assignments[idx] = (path, name)
-
-    # Second pass: derive names for colliding stems, keeping uniqueness.
-    for idx, path in enumerate(paths):
-        if assignments[idx] is not None:
-            continue
-        name = _relative_output_name(path, root)
-        if name.casefold() in used:
-            name = f"{name}_{_short_digest(path, root)}"
-            salt = 1
-            while name.casefold() in used:
-                name = f"{_relative_output_name(path, root)}_{_short_digest(path, root, str(salt))}"
-                salt += 1
-        used[name.casefold()] = path
-        assignments[idx] = (path, name)
+        parts = _relative_output_parts(path, root)
+        subpath = "/".join(parts)
+        if subpath.casefold() in used:
+            # Same folder + stem with a different extension: keep it readable.
+            ext_token = _sanitize(path.suffix.lstrip("."))
+            candidate = f"{subpath}_{ext_token}" if ext_token else subpath
+            if candidate.casefold() in used:
+                candidate = f"{subpath}_{_short_digest(path, root)}"
+                salt = 1
+                while candidate.casefold() in used:
+                    candidate = f"{subpath}_{_short_digest(path, root, str(salt))}"
+                    salt += 1
+            subpath = candidate
+        used[subpath.casefold()] = path
+        assignments[idx] = (path, subpath)
 
     return assignments

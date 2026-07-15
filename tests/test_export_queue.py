@@ -10,6 +10,7 @@ from ait.export_queue import (
     ItemStatus,
     build_export_command,
     validate_processed_folder,
+    discover_pipeline_folders,
 )
 
 
@@ -74,7 +75,7 @@ class ValidateFolderTest(unittest.TestCase):
         self.assertIsNone(reason)
 
     def test_valid_with_ocr_or_sam3(self):
-        for marker in ("ocr.pkl", "sam3.pkl"):
+        for marker in ("ocr.pkl", "sam3.pkl", "sam3_circular.pkl"):
             folder = make_processed_folder(self.base, f"v_{marker}", marker=marker)
             ok, _ = validate_processed_folder(folder)
             self.assertTrue(ok, marker)
@@ -117,6 +118,21 @@ class AddValidationTest(unittest.TestCase):
         self.assertEqual(item.blur_strength, 50)
         self.assertEqual(item.status, ItemStatus.PENDING)
         self.assertEqual(Path(item.source_dir), folder)
+        self.assertEqual(item.sam3_source, "auto")
+
+    def test_add_stores_sam3_source(self):
+        folder = make_processed_folder(self.base, "vid")
+        item = self.controller.add(
+            folder, self.base / "out.mp4", 51, sam3_source="circular"
+        )
+        self.assertEqual(item.sam3_source, "circular")
+
+    def test_add_rejects_invalid_sam3_source(self):
+        folder = make_processed_folder(self.base, "vid")
+        with self.assertRaises(ExportQueueError):
+            self.controller.add(
+                folder, self.base / "out.mp4", 51, sam3_source="square"
+            )
 
     def test_duplicate_source_rejected(self):
         folder = make_processed_folder(self.base, "vid")
@@ -319,6 +335,100 @@ class CommandBuildTest(unittest.TestCase):
         self.assertIn("--output", cmd)
         self.assertIn("--blur_strength", cmd)
         self.assertIn("33", cmd)
+        self.assertEqual(cmd[cmd.index("--masks") + 1], "auto")
+
+    def test_command_passes_chosen_mask_source(self):
+        controller = ExportQueueController(runner=FakeRunner([]), python_executable="py")
+        with tempfile.TemporaryDirectory() as base:
+            folder = make_processed_folder(base, "vid")
+            item = controller.add(
+                folder, Path(base) / "out.mp4", 33, sam3_source="circular"
+            )
+            cmd = build_export_command(item, "py")
+        self.assertEqual(cmd[cmd.index("--masks") + 1], "circular")
+
+
+class DiscoverPipelineFoldersTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_single_folder_returns_itself(self):
+        folder = make_processed_folder(self.base, "vid")
+        self.assertEqual(discover_pipeline_folders(folder), [folder])
+
+    def test_finds_folders_in_mirrored_tree(self):
+        f1 = make_processed_folder(self.base, "a/b/clip1")
+        f2 = make_processed_folder(self.base, "a/clip2")
+        found = discover_pipeline_folders(self.base)
+        self.assertEqual(set(found), {f1, f2})
+
+    def test_does_not_descend_into_matched_folder(self):
+        # A pipeline folder whose frames/ dir also (spuriously) looks valid
+        # must not be double-reported.
+        folder = make_processed_folder(self.base, "vid")
+        (folder / "frames" / "state.pkl").write_bytes(b"")
+        found = discover_pipeline_folders(self.base)
+        self.assertEqual(found, [folder])
+
+    def test_deterministic_order(self):
+        make_processed_folder(self.base, "z/clip")
+        make_processed_folder(self.base, "a/clip")
+        make_processed_folder(self.base, "m/clip")
+        found = discover_pipeline_folders(self.base)
+        self.assertEqual(found, sorted(found, key=lambda p: str(p)))
+
+    def test_empty_when_no_pipeline_folders(self):
+        (self.base / "just" / "frames").mkdir(parents=True)
+        self.assertEqual(discover_pipeline_folders(self.base), [])
+
+
+class DeleteSourceAfterTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_source_deleted_on_success(self):
+        folder = make_processed_folder(self.base, "vid")
+        runner = FakeRunner([FakeProcess(0)])
+        controller = ExportQueueController(runner=runner)
+        item = controller.add(
+            folder, self.base / "out.mp4", 51, delete_source_after=True
+        )
+        controller.start()
+        controller.poll()
+        self.assertEqual(item.status, ItemStatus.SUCCEEDED)
+        self.assertFalseIfExists(folder)
+
+    def test_source_kept_on_failure(self):
+        folder = make_processed_folder(self.base, "vid")
+        runner = FakeRunner([FakeProcess(3)])
+        controller = ExportQueueController(runner=runner)
+        item = controller.add(
+            folder, self.base / "out.mp4", 51, delete_source_after=True
+        )
+        controller.start()
+        controller.poll()
+        self.assertEqual(item.status, ItemStatus.FAILED)
+        self.assertTrue(folder.exists())
+
+    def test_source_kept_when_flag_off(self):
+        folder = make_processed_folder(self.base, "vid")
+        runner = FakeRunner([FakeProcess(0)])
+        controller = ExportQueueController(runner=runner)
+        controller.add(folder, self.base / "out.mp4", 51)
+        controller.start()
+        controller.poll()
+        self.assertTrue(folder.exists())
+
+    def assertFalseIfExists(self, path):
+        self.assertFalse(Path(path).exists(), f"{path} should have been deleted")
 
 
 if __name__ == "__main__":

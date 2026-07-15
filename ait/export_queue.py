@@ -9,6 +9,7 @@ fake processes. The UI owns the polling cadence; this module never blocks.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -36,13 +37,16 @@ class ExportQueueError(Exception):
 class ExportItem:
     """A single queued export job.
 
-    Records the validated processed-video folder, the explicit output path, and
-    the blur strength captured at enqueue time, plus mutable status fields.
+    Records the validated processed-video folder, the explicit output path,
+    the blur strength and the SAM3 mask source captured at enqueue time, plus
+    mutable status fields.
     """
 
     source_dir: Path
     output_path: Path
     blur_strength: int
+    sam3_source: str = "auto"
+    delete_source_after: bool = False
     status: str = ItemStatus.PENDING
     exit_code: Optional[int] = None
     error: Optional[str] = None
@@ -53,20 +57,45 @@ def validate_processed_folder(folder):
     """Validate that ``folder`` looks like a processed-video folder.
 
     Requires a ``frames/`` subdirectory and at least one of ``state.pkl``,
-    ``ocr.pkl`` or ``sam3.pkl``. Returns ``(ok, reason)`` where ``reason`` is
-    ``None`` on success and a human-readable message on failure.
+    ``ocr.pkl``, ``sam3.pkl`` or ``sam3_circular.pkl``. Returns ``(ok,
+    reason)`` where ``reason`` is ``None`` on success and a human-readable
+    message on failure.
     """
     folder = Path(folder)
     if not folder.is_dir():
         return False, "The selected path is not a folder."
     if not (folder / "frames").is_dir():
         return False, "The folder does not contain a 'frames' subdirectory."
-    for name in ("state.pkl", "ocr.pkl", "sam3.pkl"):
+    for name in ("state.pkl", "ocr.pkl", "sam3.pkl", "sam3_circular.pkl"):
         if (folder / name).exists():
             return True, None
     return False, (
-        "The folder does not contain state.pkl, ocr.pkl, or sam3.pkl."
+        "The folder does not contain state.pkl, ocr.pkl, sam3.pkl, "
+        "or sam3_circular.pkl."
     )
+
+
+def discover_pipeline_folders(root) -> list:
+    """Find processed-video folders at or under ``root``.
+
+    Returns a deterministically ordered list of directories that pass
+    ``validate_processed_folder``. If ``root`` itself is a pipeline folder it
+    is the only result. Otherwise the tree is walked and each matched folder is
+    returned without descending further into it (so a mirrored output tree like
+    ``base/a/b/clip`` yields the ``clip`` folders, not their ``frames/``).
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    found = []
+    for dirpath, dirnames, _filenames in os.walk(root):
+        dirnames.sort()  # deterministic traversal order
+        current = Path(dirpath)
+        ok, _ = validate_processed_folder(current)
+        if ok:
+            found.append(current)
+            dirnames[:] = []  # matched: do not descend into a pipeline folder
+    return found
 
 
 def _path_key(path) -> str:
@@ -94,6 +123,8 @@ def build_export_command(item: ExportItem, python_executable: str = None) -> lis
         str(item.output_path),
         "--blur_strength",
         str(item.blur_strength),
+        "--masks",
+        item.sam3_source,
     ]
 
 
@@ -128,15 +159,23 @@ class ExportQueueController:
 
     # -- queue mutation -------------------------------------------------
 
-    def add(self, source_dir, output_path, blur_strength) -> ExportItem:
+    def add(self, source_dir, output_path, blur_strength,
+            sam3_source="auto", delete_source_after=False) -> ExportItem:
         """Validate and enqueue a job, rejecting duplicates.
 
         Raises ``ExportQueueError`` with a user-facing message when the folder
         is invalid, the source folder is already queued, or the output path is
         already represented in the queue (pending/running/completed).
+
+        When ``delete_source_after`` is True the processed-video folder is
+        removed after the export exits successfully (see ``poll``).
         """
         source_dir = Path(source_dir)
         output_path = Path(output_path)
+        if sam3_source not in ("auto", "original", "circular"):
+            raise ExportQueueError(
+                f"Invalid SAM3 mask source: {sam3_source!r}."
+            )
 
         ok, reason = validate_processed_folder(source_dir)
         if not ok:
@@ -158,6 +197,8 @@ class ExportQueueController:
             source_dir=source_dir,
             output_path=output_path,
             blur_strength=int(blur_strength),
+            sam3_source=sam3_source,
+            delete_source_after=bool(delete_source_after),
             _id=self._next_id,
         )
         self._next_id += 1
@@ -263,6 +304,8 @@ class ExportQueueController:
             item.error = "Cancelled by user."
         elif returncode == 0:
             item.status = ItemStatus.SUCCEEDED
+            if item.delete_source_after:
+                self._delete_source(item)
         else:
             item.status = ItemStatus.FAILED
             item.error = f"Export exited with code {returncode}."
@@ -316,6 +359,20 @@ class ExportQueueController:
         for item in self.items:
             if item.status == ItemStatus.PENDING:
                 item.status = ItemStatus.CANCELLED
+
+    @staticmethod
+    def _delete_source(item: ExportItem) -> None:
+        """Remove the processed-video folder after a successful export.
+
+        Deletion failures are surfaced on the item but never turn a successful
+        export into a failure — the video was still produced.
+        """
+        try:
+            shutil.rmtree(item.source_dir)
+        except Exception as exc:  # keep the SUCCEEDED status; just note it
+            item.error = (
+                f"Export succeeded but could not delete the source folder: {exc}"
+            )
 
     @staticmethod
     def _terminate(proc) -> None:

@@ -34,7 +34,7 @@ from ait.utils import extract_video_frames, export_ocr_text_timeline, resolve_de
 from ait.ocr import process_video_ocr, process_videos_batch
 from ait.segmentation import process_video_sam3, process_videos_sam3_batch
 from ait.transition_detection import detect_scene_transitions
-from ait.video_discovery import discover_videos, plan_output_names
+from ait.video_discovery import discover_videos, plan_output_paths
 
 
 def cleanup_gpu_memory(device: str | None = None):
@@ -106,10 +106,12 @@ def process_single_video(video_path, output_base_dir, dict_path,
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
-        output_name (str): Explicit output subdirectory name. When omitted,
-            falls back to the legacy ``video_path.stem`` folder. Callers pass an
-            explicit name to keep two same-stem videos from silently sharing one
-            output folder (see ``ait.video_discovery.plan_output_names``).
+        output_name (str): Explicit output subdirectory path (may contain
+            ``/`` separators to mirror the source tree). When omitted, falls
+            back to the legacy ``video_path.stem`` folder. Callers pass an
+            explicit path to mirror the input folder structure and to keep two
+            same-stem videos from silently sharing one output folder (see
+            ``ait.video_discovery.plan_output_paths``).
 
     Returns:
         dict: Results containing paths to all generated files
@@ -121,8 +123,8 @@ def process_single_video(video_path, output_base_dir, dict_path,
     sam3_device_resolved = resolve_device(sam3_device)
 
     # Create video-specific output directory. Use the explicit output_name when
-    # provided (collision-safe for duplicate stems); otherwise keep the legacy
-    # per-stem folder so existing layouts are preserved.
+    # provided (a tree-mirroring, collision-safe subpath); otherwise keep the
+    # legacy per-stem folder so existing layouts are preserved.
     video_name = output_name if output_name else video_path.stem
     video_output_dir = output_base_dir / video_name
     video_output_dir.mkdir(parents=True, exist_ok=True)
@@ -293,9 +295,9 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
-        output_names (list): Optional per-video output subdirectory names,
-            parallel to ``video_paths``. When omitted, each video falls back to
-            the legacy per-stem folder.
+        output_names (list): Optional per-video output subdirectory paths
+            (tree-mirroring, may contain ``/``), parallel to ``video_paths``.
+            When omitted, each video falls back to the legacy per-stem folder.
     Returns:
         list: List of result dictionaries for each video
     """
@@ -435,9 +437,10 @@ def main():
             print(f"Error: No video files found in {video_folder}")
             return
 
-        # Plan collision-safe output folder names so two nested videos with the
-        # same stem never silently share one output directory.
-        assignments = plan_output_names(video_paths, video_folder)
+        # Plan tree-mirroring, collision-safe output subpaths so the output
+        # directory reproduces the input folder structure and two nested videos
+        # with the same stem never silently share one output directory.
+        assignments = plan_output_paths(video_paths, video_folder)
         video_paths = [p for p, _ in assignments]
         output_names = [name for _, name in assignments]
 

@@ -15,7 +15,9 @@ from ait.export_queue import (
     ExportQueueController,
     ExportQueueError,
     validate_processed_folder,
+    discover_pipeline_folders,
 )
+from ait.config import get_last_browse_dir, set_last_browse_dir
 
 
 class AiTLauncher:
@@ -37,6 +39,10 @@ class AiTLauncher:
         # Sequential export queue (runs one export_video subprocess at a time)
         self.queue_controller = ExportQueueController()
         self._poll_job = None
+
+        # Last mask choice made in the export dialog; used as the default for
+        # folders the annotation viewer never recorded a choice for.
+        self._last_mask_choice = None
 
         self._create_ui()
 
@@ -172,19 +178,24 @@ class AiTLauncher:
             command=self._add_to_queue
         ).pack(side=tk.RIGHT)
 
-        # Queue table showing each job's source, output, blur, and status
-        columns = ("source", "output", "blur", "status")
+        # Queue table showing each job's source, output, blur, masks, delete
+        # flag, and status
+        columns = ("source", "output", "blur", "masks", "del", "status")
         self.queue_tree = ttk.Treeview(
             export_frame, columns=columns, show="headings", height=6
         )
         self.queue_tree.heading("source", text="Source Folder")
         self.queue_tree.heading("output", text="Output File")
         self.queue_tree.heading("blur", text="Blur")
+        self.queue_tree.heading("masks", text="Masks")
+        self.queue_tree.heading("del", text="Del")
         self.queue_tree.heading("status", text="Status")
-        self.queue_tree.column("source", width=180, anchor=tk.W)
-        self.queue_tree.column("output", width=180, anchor=tk.W)
-        self.queue_tree.column("blur", width=45, anchor=tk.CENTER)
-        self.queue_tree.column("status", width=85, anchor=tk.W)
+        self.queue_tree.column("source", width=150, anchor=tk.W)
+        self.queue_tree.column("output", width=150, anchor=tk.W)
+        self.queue_tree.column("blur", width=40, anchor=tk.CENTER)
+        self.queue_tree.column("masks", width=65, anchor=tk.CENTER)
+        self.queue_tree.column("del", width=35, anchor=tk.CENTER)
+        self.queue_tree.column("status", width=80, anchor=tk.W)
         self.queue_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
         # Queue control buttons
@@ -307,53 +318,357 @@ class AiTLauncher:
     
     # === EXPORT QUEUE ===
 
+    def _default_mask_choice(self, folder_path, has_original, has_circular):
+        """Default masks selection for the export dialog.
+
+        Priority: the choice recorded by the annotation viewer for this video
+        (mask_choice.txt), then whichever variant is the only one available,
+        then the last choice made in this launcher session, then original.
+        """
+        choice_file = folder_path / "mask_choice.txt"
+        if choice_file.exists():
+            try:
+                choice = choice_file.read_text().strip().lower()
+            except OSError:
+                choice = ""
+            if choice == "circular" and has_circular:
+                return "circular"
+            if choice == "original" and has_original:
+                return "original"
+        if has_circular and not has_original:
+            return "circular"
+        if has_original and not has_circular:
+            return "original"
+        if self._last_mask_choice in ("original", "circular"):
+            return self._last_mask_choice
+        return "original"
+
+    @staticmethod
+    def _default_output_path(folder_path):
+        """Default export destination: sibling of the pipeline folder.
+
+        Placed right next to the folder that holds the pipeline files, named
+        ``<folder>_anonymized.mp4``.
+        """
+        return folder_path.parent / f"{folder_path.name}_anonymized.mp4"
+
+    def _ask_export_options(self, folder_path):
+        """Modal dialog: output file, SAM3 masks, and delete-after for one job.
+
+        Returns ``(output_path, sam3_source, delete_source)`` or ``None`` if
+        cancelled. ``sam3_source`` is ``"auto"`` when reviewed state.pkl masks
+        apply.
+        """
+        state_exists = (folder_path / "state.pkl").exists()
+        has_original = (folder_path / "sam3.pkl").exists()
+        has_circular = (folder_path / "sam3_circular.pkl").exists()
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Choose Export Output File")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+
+        frame = ttk.Frame(dialog, padding="15")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            frame, text=f"Source: {folder_path.name}", foreground="gray"
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        # Output file row (pre-filled with the default so no navigation needed)
+        ttk.Label(frame, text="Output file:").grid(row=1, column=0, sticky=tk.W)
+        output_var = tk.StringVar(value=str(self._default_output_path(folder_path)))
+        output_entry = ttk.Entry(frame, textvariable=output_var, width=48)
+        output_entry.grid(row=1, column=1, sticky=tk.EW, padx=5)
+
+        def browse_output():
+            selected = filedialog.asksaveasfilename(
+                parent=dialog,
+                title="Choose Export Output File",
+                initialdir=str(Path(output_var.get()).parent),
+                initialfile=Path(output_var.get()).name,
+                defaultextension=".mp4",
+                filetypes=[("MP4 Video", "*.mp4"), ("AVI Video", "*.avi"),
+                           ("All Files", "*.*")]
+            )
+            if selected:
+                output_var.set(selected)
+
+        ttk.Button(frame, text="Browse...", command=browse_output).grid(
+            row=1, column=2
+        )
+
+        # SAM3 mask choice row
+        ttk.Label(frame, text="SAM3 masks:").grid(
+            row=2, column=0, sticky=tk.W, pady=(10, 0)
+        )
+        mask_var = tk.StringVar(
+            value=self._default_mask_choice(folder_path, has_original, has_circular)
+        )
+        mask_frame = ttk.Frame(frame)
+        mask_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W, pady=(10, 0))
+
+        original_radio = ttk.Radiobutton(
+            mask_frame, text="Original", variable=mask_var, value="original"
+        )
+        original_radio.pack(side=tk.LEFT, padx=(0, 10))
+        circular_radio = ttk.Radiobutton(
+            mask_frame, text="Circular", variable=mask_var, value="circular"
+        )
+        circular_radio.pack(side=tk.LEFT)
+
+        note = None
+        if state_exists:
+            # Reviewed annotations already contain the masks chosen in the
+            # viewer; the export ignores the mask option in that case.
+            original_radio.config(state=tk.DISABLED)
+            circular_radio.config(state=tk.DISABLED)
+            note = ("Masks reviewed in the annotation viewer (state.pkl) "
+                    "will be used.")
+        else:
+            if not has_original:
+                original_radio.config(state=tk.DISABLED)
+            if not has_circular:
+                circular_radio.config(state=tk.DISABLED)
+            if (folder_path / "mask_choice.txt").exists():
+                note = "Pre-selected from your annotation viewer choice."
+        if note:
+            ttk.Label(frame, text=note, foreground="gray").grid(
+                row=3, column=1, columnspan=2, sticky=tk.W, pady=(4, 0)
+            )
+
+        # Delete-after-export option (destructive; off by default)
+        delete_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frame,
+            text="Delete pipeline folder after successful export",
+            variable=delete_var,
+        ).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(12, 0))
+
+        # Buttons
+        result = {}
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=5, column=0, columnspan=3, sticky=tk.E, pady=(15, 0))
+
+        def on_add():
+            output = output_var.get().strip()
+            if not output:
+                messagebox.showerror(
+                    "Missing Output", "Choose an output file.", parent=dialog
+                )
+                return
+            result["output"] = output
+            result["masks"] = "auto" if state_exists else mask_var.get()
+            result["delete"] = delete_var.get()
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(
+            side=tk.RIGHT, padx=(5, 0)
+        )
+        ttk.Button(buttons, text="Add to Queue", command=on_add).pack(
+            side=tk.RIGHT
+        )
+
+        frame.columnconfigure(1, weight=1)
+        dialog.bind("<Return>", lambda e: on_add())
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.grab_set()
+        output_entry.focus_set()
+        self.root.wait_window(dialog)
+
+        if "output" not in result:
+            return None
+        if not state_exists:
+            self._last_mask_choice = result["masks"]
+        return result["output"], result["masks"], result["delete"]
+
+    def _ask_batch_export_options(self, folders):
+        """Modal dialog to enqueue several discovered pipeline folders at once.
+
+        Output paths default to each folder's sibling ``<name>_anonymized.mp4``
+        so no per-video navigation is needed. Returns a list of
+        ``(folder, output_path, sam3_source, delete_source)`` tuples, or
+        ``None`` if cancelled.
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Add Multiple Exports to Queue")
+        dialog.transient(self.root)
+
+        frame = ttk.Frame(dialog, padding="15")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            frame,
+            text=f"Found {len(folders)} processed folder(s). Each exports to "
+                 f"<name>_anonymized.mp4 next to its folder.",
+            foreground="gray",
+            wraplength=520,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        # Scrollable checklist of discovered folders
+        list_container = ttk.Frame(frame)
+        list_container.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(list_container, height=180, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(
+            list_container, orient=tk.VERTICAL, command=canvas.yview
+        )
+        inner = ttk.Frame(canvas)
+        inner.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        check_vars = []
+        for folder in folders:
+            var = tk.BooleanVar(value=True)
+            check_vars.append(var)
+            ttk.Checkbutton(inner, text=str(folder), variable=var).pack(
+                anchor=tk.W, pady=1
+            )
+
+        # Global SAM3 mask choice for the whole batch
+        mask_frame = ttk.Frame(frame)
+        mask_frame.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(mask_frame, text="SAM3 masks:").pack(side=tk.LEFT, padx=(0, 8))
+        mask_var = tk.StringVar(value="auto")
+        for text, value in (("Auto (per folder)", "auto"),
+                            ("Original", "original"),
+                            ("Circular", "circular")):
+            ttk.Radiobutton(
+                mask_frame, text=text, variable=mask_var, value=value
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Label(
+            frame,
+            text="Auto follows each folder's annotation-viewer choice, else "
+                 "reviewed state.pkl masks, else original.",
+            foreground="gray",
+            wraplength=520,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(4, 0))
+
+        # Global delete-after option (destructive; off by default)
+        delete_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frame,
+            text="Delete each pipeline folder after its successful export",
+            variable=delete_var,
+        ).pack(anchor=tk.W, pady=(12, 0))
+
+        result = {}
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill=tk.X, pady=(15, 0))
+
+        def on_add():
+            chosen = [
+                folder for folder, var in zip(folders, check_vars) if var.get()
+            ]
+            if not chosen:
+                messagebox.showinfo(
+                    "Nothing Selected",
+                    "Select at least one folder to add.",
+                    parent=dialog,
+                )
+                return
+            result["folders"] = chosen
+            result["masks"] = mask_var.get()
+            result["delete"] = delete_var.get()
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(
+            side=tk.RIGHT, padx=(5, 0)
+        )
+        ttk.Button(buttons, text="Add Selected to Queue", command=on_add).pack(
+            side=tk.RIGHT
+        )
+
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+
+        if "folders" not in result:
+            return None
+        if result["masks"] in ("original", "circular"):
+            self._last_mask_choice = result["masks"]
+        return [
+            (
+                folder,
+                self._default_output_path(folder),
+                result["masks"],
+                result["delete"],
+            )
+            for folder in result["folders"]
+        ]
+
     def _add_to_queue(self):
-        """Select a processed folder + output path and enqueue an export job."""
+        """Select folder(s) and enqueue one or many export jobs.
+
+        The chosen folder may be a single processed-video folder or a parent
+        holding many (e.g. a mirrored output tree); all pipeline folders found
+        underneath are offered for batch enqueue.
+        """
         folder = filedialog.askdirectory(
-            title="Select Processed Video Folder "
-                  "(containing frames/ and state.pkl/ocr.pkl/sam3.pkl)",
-            mustexist=True
+            title="Select a Processed Folder or a Parent of Several",
+            mustexist=True,
+            initialdir=get_last_browse_dir(),
         )
         if not folder:
             return
 
         folder_path = Path(folder)
+        set_last_browse_dir(folder_path)
 
-        # Validate early so the user gets specific feedback before choosing an
-        # output file. The controller re-validates on add.
-        ok, reason = validate_processed_folder(folder_path)
-        if not ok:
+        pipeline_folders = discover_pipeline_folders(folder_path)
+        if not pipeline_folders:
             messagebox.showerror(
-                "Invalid Folder",
-                f"{reason}\n\nSelected: {folder_path}"
+                "No Processed Folders",
+                "No folder containing frames/ and state.pkl/ocr.pkl/sam3.pkl "
+                f"was found in:\n\n{folder_path}"
             )
             return
 
-        # Ask for an explicit output path so the destination is predictable.
-        output_path = filedialog.asksaveasfilename(
-            title="Choose Export Output File",
-            initialdir=str(folder_path.parent),
-            initialfile=f"{folder_path.name}_anonymized.mp4",
-            defaultextension=".mp4",
-            filetypes=[("MP4 Video", "*.mp4"), ("AVI Video", "*.avi"), ("All Files", "*.*")]
-        )
-        if not output_path:
-            return
-
-        # Capture blur strength now (odd), stored on the job.
+        # Capture blur strength now (odd), shared by every job added here.
         blur_strength = self.blur_strength_var.get()
         if blur_strength % 2 == 0:
             blur_strength += 1
             self.blur_strength_var.set(blur_strength)
 
-        try:
-            self.queue_controller.add(folder_path, output_path, blur_strength)
-        except ExportQueueError as e:
-            messagebox.showerror("Cannot Add to Queue", str(e))
-            return
+        if len(pipeline_folders) == 1:
+            options = self._ask_export_options(pipeline_folders[0])
+            if options is None:
+                return
+            output_path, sam3_source, delete_source = options
+            jobs = [(pipeline_folders[0], output_path, sam3_source, delete_source)]
+        else:
+            jobs = self._ask_batch_export_options(pipeline_folders)
+            if jobs is None:
+                return
+
+        added, errors = 0, []
+        for source, output_path, sam3_source, delete_source in jobs:
+            try:
+                self.queue_controller.add(
+                    source, output_path, blur_strength,
+                    sam3_source=sam3_source,
+                    delete_source_after=delete_source,
+                )
+                added += 1
+            except ExportQueueError as e:
+                errors.append(f"{Path(source).name}: {e}")
 
         self._refresh_queue()
-        self.status_label.config(text=f"Queued: {folder_path.name}")
+        if errors:
+            messagebox.showwarning(
+                "Some Jobs Not Added",
+                f"Added {added} job(s). Skipped {len(errors)}:\n\n"
+                + "\n".join(errors)
+            )
+        self.status_label.config(text=f"Queued {added} job(s)")
 
     def _remove_selected(self):
         """Remove the selected pending job from the queue."""
@@ -452,12 +767,17 @@ class AiTLauncher:
         self.queue_tree.delete(*self.queue_tree.get_children())
         for item in self.queue_controller.items:
             iid = str(item._id)
+            masks_display = (
+                "reviewed" if item.sam3_source == "auto" else item.sam3_source
+            )
             self.queue_tree.insert(
                 "", tk.END, iid=iid,
                 values=(
                     str(item.source_dir),
                     str(item.output_path),
                     item.blur_strength,
+                    masks_display,
+                    "yes" if item.delete_source_after else "",
                     item.error if item.status == "failed" and item.error else item.status,
                 )
             )

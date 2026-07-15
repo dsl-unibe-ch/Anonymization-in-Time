@@ -46,3 +46,23 @@ def set_sam3_model_path(path: str | Path) -> None:
     config = load_config()
     config["sam3_model_path"] = str(path)
     save_config(config)
+
+
+def get_last_browse_dir() -> str | None:
+    """Return the last directory browsed in a file dialog, if still valid.
+
+    macOS file dialogs do not remember the previous location across dialog
+    instances the way Windows does, so we persist it ourselves and pass it as
+    ``initialdir``.
+    """
+    path = load_config().get("last_browse_dir")
+    if path and Path(path).is_dir():
+        return path
+    return None
+
+
+def set_last_browse_dir(path: str | Path) -> None:
+    """Persist the last directory browsed in a file dialog."""
+    config = load_config()
+    config["last_browse_dir"] = str(path)
+    save_config(config)
