@@ -1,0 +1,66 @@
+# Publish to PyPI whenever a GitHub release is published.
+#
+# Uses PyPI Trusted Publishing (no API token stored anywhere). One-time setup on
+# pypi.org -> anonymization-in-time -> Settings -> Publishing -> Add a GitHub publisher:
+#   owner: dsl-unibe-ch   repository: Anonymization-in-Time
+#   workflow: publish.yml  environment: pypi
+#
+# Release checklist: bump `version` in pyproject.toml, push, then publish a GitHub
+# release whose tag is v<version> (e.g. v1.3.0). The build fails if they differ.
+# "Run workflow" (workflow_dispatch) publishes the version on the chosen branch.
+
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check release tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match pyproject.toml version $version"
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/anonymization-in-time/
+    permissions:
+      id-token: write   # required for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
