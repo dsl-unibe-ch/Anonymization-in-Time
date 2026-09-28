@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from ait.utils import (rebuild_full_mask, shared_alterego_font_sizes,
                        load_alterego_font, fit_alterego_font_size)
+from ait.frame_files import VIDEO_INFO_NAME, list_frame_files, read_video_info
 
 
 def apply_blur_to_region(image, mask, blur_strength=51):
@@ -161,6 +162,50 @@ def load_transitions(video_dir):
     return transitions
 
 
+DEFAULT_FPS = 30.0
+
+
+def resolve_export_fps(video_dir, fps=None):
+    """
+    Frame rate for the exported video.
+
+    Order: explicit ``fps`` -> ``frames/video_info.json`` written at extraction
+    (source fps divided by frame_step, so the export keeps real-time speed) ->
+    a source video named like the folder in its parent directory (legacy layout)
+    -> 30 fps with a warning.
+    """
+    if fps:
+        print(f"Using specified FPS: {fps}")
+        return fps
+
+    video_dir = Path(video_dir)
+    info = read_video_info(video_dir / "frames")
+    if info and info.get("fps"):
+        step = max(1, int(info.get("frame_step") or 1))
+        fps = float(info["fps"]) / step
+        step_note = f" / frame step {step}" if step > 1 else ""
+        print(f"FPS from extraction info: {info['fps']}{step_note} -> {fps:g}")
+        return fps
+
+    for ext in ('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm'):
+        candidate = video_dir.parent / f"{video_dir.name}{ext}"
+        if candidate.exists():
+            cap = cv2.VideoCapture(str(candidate))
+            try:
+                fps_val = cap.get(cv2.CAP_PROP_FPS)
+            finally:
+                cap.release()
+            if fps_val and fps_val > 0:
+                print(f"Auto-detected FPS from {candidate.name}: {fps_val}")
+                return float(fps_val)
+            break
+
+    print(f"⚠️  Could not determine the source frame rate; using {DEFAULT_FPS:g} fps. "
+          f"If the source had a different rate, the export plays at the wrong speed: "
+          f"pass --fps, or re-run processing so frames/{VIDEO_INFO_NAME} is written.")
+    return DEFAULT_FPS
+
+
 def resolve_sam3_file(video_dir, sam3_source="auto"):
     """
     Pick which SAM3 pickle to load when there is no reviewed state.pkl.
@@ -255,8 +300,8 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
     if not frames_dir.exists():
         raise FileNotFoundError(f"Frames directory not found: {frames_dir}")
     
-    # Get all frame files
-    frame_files = sorted(frames_dir.glob("*.png")) or sorted(frames_dir.glob("*.jpg"))
+    # Get all frame files, in frame order (numeric: 10000.jpg comes after 9999.jpg)
+    frame_files = list_frame_files(frames_dir, (".png",)) or list_frame_files(frames_dir, (".jpg",))
     if not frame_files:
         raise FileNotFoundError(f"No frames found in {frames_dir}")
     
@@ -319,33 +364,8 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
     first_frame = cv2.imread(str(frame_files[0]))
     height, width = first_frame.shape[:2]
     
-    # Auto-detect FPS if not provided
-    if fps is None:
-        # Try to find the original video in the parent directory to read its FPS
-        detected_fps = None
-        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm']
-        video_name = video_dir.name
-        # Check parent dir for a video matching the folder name
-        parent = video_dir.parent
-        for ext in video_extensions:
-            candidate = parent / f"{video_name}{ext}"
-            if candidate.exists():
-                cap = cv2.VideoCapture(str(candidate))
-                try:
-                    fps_val = cap.get(cv2.CAP_PROP_FPS)
-                    if fps_val and fps_val > 0:
-                        detected_fps = float(fps_val)
-                        print(f"Auto-detected FPS from {candidate.name}: {detected_fps}")
-                finally:
-                    cap.release()
-                break
-        
-        fps = detected_fps if detected_fps else 30.0
-        if detected_fps is None:
-            print(f"Could not auto-detect FPS, using default: {fps}")
-    else:
-        print(f"Using specified FPS: {fps}")
-    
+    fps = resolve_export_fps(video_dir, fps)
+
     # Setup video writer
     fourcc = cv2.VideoWriter_fourcc(*codec)
     out = cv2.VideoWriter(str(output_video_path), fourcc, fps, (width, height))

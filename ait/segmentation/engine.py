@@ -22,6 +22,7 @@ except ImportError:
 
 from ait.utils import resolve_device
 from ait.config import get_sam3_model_path, CONFIG_FILE
+from ait.frame_files import list_frame_files
 
 
 def resolve_model_path(model_path=None):
@@ -135,12 +136,5 @@ def process_image(predictor, image_path, text_prompt, frame_idx=0):
 
 
 def get_image_files(folder_path):
-    """Get all image files from folder, sorted."""
-    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
-    image_files = set()
-
-    for ext in image_extensions:
-        image_files.update(Path(folder_path).glob(f'*{ext}'))
-        image_files.update(Path(folder_path).glob(f'*{ext.upper()}'))
-
-    return sorted(image_files)
+    """Get all image files from folder, in frame order (numeric, not alphabetical)."""
+    return list_frame_files(folder_path)

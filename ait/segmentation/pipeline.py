@@ -28,6 +28,7 @@ from .circularize import circularize_results
 from .format import convert_to_unified_dict
 
 from ait.utils import rebuild_full_mask, resolve_device, cleanup_device
+from ait.frame_files import frame_number, order_results_by_frame
 
 import copy
 
@@ -101,6 +102,27 @@ def _save_images_with_masks(img, results, output_path, mode='color', alpha=0.5, 
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
+
+def _discard_legacy_sam3_outputs(output_folder):
+    """
+    detected_masks.pkl was written by a version that ordered frames alphabetically
+    and keyed them by list position, which misplaces masks in videos over 9,999
+    frames or with frame_step > 1. Don't reuse it or anything derived from it:
+    remove them so this run redoes the SAM3 stage from scratch.
+    """
+    output_folder = Path(output_folder)
+    print("⚠️  Cached SAM3 results use the old (alphabetical) frame order and would put "
+          "masks on the wrong frames. Discarding them and re-running SAM3.")
+    for name in ("detected_masks.pkl", "detected_masks_propagated.pkl", "mask_tracks.pkl",
+                 "detected_masks_circular.pkl", "sam3.pkl", "sam3_circular.pkl"):
+        path = output_folder / name
+        if path.exists():
+            path.unlink()
+            print(f"  Removed stale {name}")
+    if (output_folder / "state.pkl").exists():
+        print("⚠️  state.pkl (reviewed annotations) contains the misplaced masks and takes "
+              "priority at export. Delete it and review this video again.")
+
 
 def _cleanup_intermediate_pickles(output_folder):
     """Remove transient SAM3 cache files after final outputs are generated."""
@@ -187,11 +209,16 @@ def process_video_sam3(frames_folder, output_folder,
 
     # Stage 1: Per-frame inference
     pickle_path = output_folder / 'detected_masks.pkl'
-    try:
+    all_results = None
+    if pickle_path.exists():
         with open(pickle_path, 'rb') as f:
-            all_results = pickle.load(f)
-        print(f"Loaded existing results from {pickle_path}, skipping processing")
-    except FileNotFoundError:
+            cached = pickle.load(f)
+        if order_results_by_frame(cached)[1]:
+            _discard_legacy_sam3_outputs(output_folder)
+        else:
+            all_results = cached
+            print(f"Loaded existing results from {pickle_path}, skipping processing")
+    if all_results is None:
         all_results = []
         print("\nStarting processing...")
 
@@ -203,7 +230,12 @@ def process_video_sam3(frames_folder, output_folder,
         processed = 0
         consecutive_skips = 0
 
-        for frame_idx, img_path in enumerate(tqdm(image_files, desc="Processing frames")):
+        for list_idx, img_path in enumerate(tqdm(image_files, desc="Processing frames")):
+            # Key results by the frame number in the file name, like OCR and export
+            # do; the list position differs for frame_step > 1.
+            frame_idx = frame_number(img_path)
+            if frame_idx is None:
+                frame_idx = list_idx
             try:
                 img = Image.open(img_path).convert('RGB')
                 img_shape = (img.height, img.width)

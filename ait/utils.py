@@ -12,6 +12,8 @@ from collections import defaultdict
 from tqdm import tqdm
 from PIL import ImageFont
 
+from ait.frame_files import write_video_info
+
 
 ######### OCR RENDERING HELPERS #########
 
@@ -221,6 +223,11 @@ def extract_video_frames(video_path, output_dir=None, frame_step=1, starting_sec
     if output_dir is None:
         output_dir = os.path.join(video_dir, video_name)
     os.makedirs(output_dir, exist_ok=True)
+
+    # Record the source frame rate and step, so the export keeps real-time speed
+    # even when the source video is not next to the output folder.
+    write_video_info(output_dir, source=video_path, fps=fps, frame_step=frame_step,
+                     frame_count=frame_count, start_frame=start_frame, end_frame=end_frame)
     
     # Calculate expected number of frames to be extracted
     total_frames_in_range = end_frame - start_frame

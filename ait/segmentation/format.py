@@ -43,16 +43,19 @@ def convert_to_unified_dict(all_results, tracks=None):
 
     Returns dict keyed by frame_idx, each value is a list of detection dicts.
     """
+    # Tracks refer to positions in all_results (neighbouring frames), while the
+    # output is keyed by frame_idx, the frame number of the image file. The two
+    # differ whenever frame_step > 1.
     track_map = {}
     if tracks:
         for track_id, track in enumerate(tracks):
-            for frame_idx, mask_idx in track:
-                track_map[(frame_idx, mask_idx)] = track_id
+            for list_idx, mask_idx in track:
+                track_map[(list_idx, mask_idx)] = track_id
 
     unified = {}
     emoji_count = 0
 
-    for frame_idx, frame_results, img_path in all_results:
+    for list_idx, (frame_idx, frame_results, img_path) in enumerate(all_results):
         boxes = frame_results.get("boxes", [])
         masks = frame_results.get("masks", [])
         scores = frame_results.get("scores", [])
@@ -73,7 +76,7 @@ def convert_to_unified_dict(all_results, tracks=None):
                     continue
                 mask_data = mask_np
 
-            track_id = track_map.get((frame_idx, i), None)
+            track_id = track_map.get((list_idx, i), None)
 
             # Check for yellow emoji
             is_emoji = False
