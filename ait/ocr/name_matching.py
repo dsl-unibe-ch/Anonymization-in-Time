@@ -3,14 +3,14 @@ Name matching logic for the OCR pipeline.
 
 Matches detected word-level boxes against a dictionary of names.
 Features:
-  - Length-aware fuzzy matching (short words require exact/near-exact match)
+  - Length-aware fuzzy matching: tolerates OCR typos by edit distance
+    (strict for short words, 1 edit for 4-7 letters, 2 for 8+)
   - Common-word guard: frequent English/German words cannot be fuzzy-matched
   - Partial name support: "Amina" matches "Amina Hamzic" when only first name appears
   - Multi-word sequence matching across adjacent boxes on the same line
 """
 
 import unicodedata
-from difflib import SequenceMatcher
 
 # ---------------------------------------------------------------------------
 # Common words that must NOT fuzzy-match name parts.
@@ -82,10 +82,13 @@ def _word_matches_name_part(word: str, name_part: str) -> tuple:
 
     Returns (matched: bool, confidence: float).
 
-    Matching rules (most-restrictive-first):
-      len <= 2 : exact match only
-      len 3-4  : exact OR edit-distance == 1 AND not a common word
-      len >= 5 : SequenceMatcher >= 0.85 AND not a common word (fuzzy only)
+    Tolerated OCR typos (letter substituted, swapped, dropped or added):
+      either word <= 2 letters : exact only
+      3-letter name part       : one substituted letter only
+      longer word 4-7 letters  : 1 edit
+      longer word >= 8 letters : 2 edits
+    Short words need the strict rules: with one free insertion, "AI" (as in
+    "Meta AI") would match the name "Ali" in nearly every frame of a chat.
 
     Common-word guard: if the normalized OCR word is in COMMON_WORDS, only an
     exact match is accepted regardless of length.
@@ -105,25 +108,44 @@ def _word_matches_name_part(word: str, name_part: str) -> tuple:
         return False, 0.0
 
     max_len = max(len(nw), len(np_))
-
-    if max_len <= 2:
-        # No fuzzy for very short words — exact only (handled above)
+    if min(len(nw), len(np_)) <= 2:
         return False, 0.0
 
-    if max_len <= 4:
-        # Edit distance <= 1
-        if abs(len(nw) - len(np_)) <= 1:
-            diffs = sum(1 for a, b in zip(nw, np_) if a != b)
-            diffs += abs(len(nw) - len(np_))
-            if diffs <= 1:
-                return True, 0.85
+    if len(np_) == 3:
+        # one substituted letter only (no added, dropped or swapped letters)
+        if len(nw) == 3 and sum(a != b for a, b in zip(nw, np_)) == 1:
+            return True, 2 / 3
         return False, 0.0
 
-    # len >= 5: fuzzy match with raised threshold
-    ratio = SequenceMatcher(None, nw, np_).ratio()
-    if ratio >= 0.85:
-        return True, ratio
+    budget = 1 if max_len <= 7 else 2
+    if abs(len(nw) - len(np_)) > budget:
+        return False, 0.0
+
+    distance = _edit_distance(nw, np_)
+    if distance <= budget:
+        return True, 1.0 - distance / max_len
     return False, 0.0
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """
+    Number of single-letter edits (substitute, insert, delete, swap two
+    neighbouring letters) turning ``a`` into ``b`` (optimal string alignment).
+    """
+    prev2 = None
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1,          # delete
+                         cur[j - 1] + 1,       # insert
+                         prev[j - 1] + cost)   # substitute
+            if (prev2 is not None and i > 1 and j > 1
+                    and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]):
+                cur[j] = min(cur[j], prev2[j - 2] + 1)  # swap
+        prev2, prev = prev, cur
+    return prev[len(b)]
 
 
 def build_name_index(names_dict: dict) -> dict:
