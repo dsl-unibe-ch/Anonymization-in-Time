@@ -15,7 +15,8 @@ from tqdm import tqdm
 from PIL import Image, ImageDraw, ImageFont
 
 from ait.utils import (rebuild_full_mask, shared_alterego_font_sizes,
-                       load_alterego_font, fit_alterego_font_size)
+                       track_alterego_font_sizes, load_alterego_font,
+                       fit_alterego_font_size)
 from ait.frame_files import VIDEO_INFO_NAME, list_frame_files, read_video_info
 
 
@@ -366,6 +367,15 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
     
     fps = resolve_export_fps(video_dir, fps)
 
+    # One font size per OCR track: fitting every frame's slightly wobbling box
+    # made static fake names jump between sizes.
+    track_font_sizes = track_alterego_font_sizes(
+        ocr_annotations,
+        lambda ann: fit_alterego_font_size(ann.get('alterego', ''),
+                                           ann['bbox'][2] - ann['bbox'][0],
+                                           ann['bbox'][3] - ann['bbox'][1], font_path),
+    ) if ocr_blur else {}
+
     # Setup video writer
     fourcc = cv2.VideoWriter_fourcc(*codec)
     out = cv2.VideoWriter(str(output_video_path), fourcc, fps, (width, height))
@@ -459,6 +469,9 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
         anns_only = [t[0] for t in ocr_text_overlays]
         coords_by_id = {id(t[0]): (t[2], t[3], t[4], t[5]) for t in ocr_text_overlays}
         def _per_box_size(ann):
+            key = (ann.get('track_id'), (ann.get('alterego') or '').strip())
+            if key in track_font_sizes:
+                return track_font_sizes[key]   # stable over time
             x1, y1, x2, y2 = coords_by_id[id(ann)]
             return fit_alterego_font_size(ann.get('alterego', ''), x2 - x1, y2 - y1, font_path)
         group_sizes = shared_alterego_font_sizes(anns_only, _per_box_size)

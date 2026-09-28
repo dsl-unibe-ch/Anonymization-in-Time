@@ -6,6 +6,7 @@ import functools
 from pathlib import Path
 import pickle
 import re
+import statistics
 import unicodedata
 import numpy as np
 from collections import defaultdict
@@ -107,6 +108,34 @@ def shared_alterego_font_sizes(annotations, per_box_size_fn):
         for a in group:
             final[id(a)] = s
     return final
+
+
+def track_alterego_font_sizes(ocr_annotations, per_box_size_fn):
+    """
+    One font size per OCR track, so a fake name keeps its size over time.
+
+    OCR boxes wobble by a pixel between frames; fitting the font to every
+    frame's box made a static name jump between sizes. The per-frame best fits
+    of a track are reduced to their lower median: a size that actually fitted,
+    and that fits at least half of the track's boxes.
+
+    Args:
+        ocr_annotations: {frame_idx: [OCR annotation dict, ...]}
+        per_box_size_fn: callable(ann) -> best font size for this single box.
+
+    Returns:
+        dict mapping (track_id, alterego) -> font size. Annotations without a
+        track_id, hidden ones, and ones with an empty alterego are skipped.
+    """
+    fits = defaultdict(list)
+    for annotations in ocr_annotations.values():
+        for ann in annotations:
+            track_id = ann.get("track_id")
+            alterego = (ann.get("alterego") or "").strip()
+            if track_id is None or not alterego or not ann.get("to_show", True):
+                continue
+            fits[(track_id, alterego)].append(per_box_size_fn(ann))
+    return {key: statistics.median_low(values) for key, values in fits.items()}
 
 ######### VIDEO LOADING & SAVING #########
 
