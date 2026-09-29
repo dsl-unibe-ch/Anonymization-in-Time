@@ -38,7 +38,7 @@ AiT_app/
 For GPU acceleration, install the CUDA build **before** the package:
 ```bash
 # CUDA 12.6 (replace cu126 with your version, e.g. cu118, cu121, cu124)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 ```
 
 Check your CUDA version with `nvidia-smi`. Skip this step if CPU-only is fine.
