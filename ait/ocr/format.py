@@ -15,6 +15,9 @@ Output schema per box:
         "source":     "ocr",
         "to_show":    bool,
         "track_id":   int or None,
+        "extrapolated": bool,              True if added by scroll_extension
+                                            (no OCR detection; bbox may run
+                                            past the frame edge)
     }
 """
 
@@ -65,6 +68,7 @@ def to_unified(frame_boxes: dict) -> dict:
                 "source":     "ocr",
                 "to_show":    bool(box.get("to_show", True)),
                 "track_id":   track_id,
+                "extrapolated": bool(box.get("extrapolated", False)),
             })
         unified[frame_idx] = out
     return unified

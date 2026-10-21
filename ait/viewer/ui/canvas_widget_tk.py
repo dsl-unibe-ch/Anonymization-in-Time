@@ -327,8 +327,9 @@ class CanvasWidget(tk.Canvas):
         # Draw text for OCR
         if ann.get('source') == 'ocr' and ann.get('text') and is_visible:
             text = ann.get('text', '')
-            label = text
-            
+            # Not an OCR detection: carried on while the name scrolls out/in
+            label = f"{text} (extended)" if ann.get('extrapolated') else text
+
             try:
                 font = ImageFont.truetype("arial.ttf", 12)
             except:
@@ -501,16 +502,17 @@ class CanvasWidget(tk.Canvas):
         
         # Apply blur
         if blur_mask.any():
-            kernel_size = 51  # Match export blur strength
+            kernel_size = 91  # Match export blur strength
             blurred = cv2.GaussianBlur(cv_img, (kernel_size, kernel_size), 0)
             cv_img[blur_mask] = blurred[blur_mask]
         
         # Uniform font size per matched name — so adjacent words of one
         # alterego render at the same visual size.
+        # Sized on the unclamped box, so a name running past the frame edge
+        # keeps its size.
         anns_only = [t[0] for t in ocr_text_overlays]
-        coords_by_id = {id(t[0]): (t[2], t[3], t[4], t[5]) for t in ocr_text_overlays}
         def _per_box_size(ann):
-            x1, y1, x2, y2 = coords_by_id[id(ann)]
+            x1, y1, x2, y2 = ann['bbox']
             return fit_alterego_font_size(ann.get('alterego', ''), x2 - x1, y2 - y1)
         group_sizes = shared_alterego_font_sizes(anns_only, _per_box_size)
         for ann, original_patch, x1, y1, x2, y2 in ocr_text_overlays:
@@ -519,14 +521,19 @@ class CanvasWidget(tk.Canvas):
                 cv_img = self._add_text_overlay(
                     cv_img, ann, original_patch, x1, y1, x2, y2,
                     font_size=group_sizes.get(id(ann)),
+                    text_box=tuple(ann['bbox']),
                 )
         
         # Convert back to PIL
         return Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
     
     def _add_text_overlay(self, cv_img, ann, original_patch, x1, y1, x2, y2,
-                          font_size=None):
-        """Add replacement text with color matching."""
+                          font_size=None, text_box=None):
+        """Add replacement text with color matching.
+
+        text_box: unclamped box to position the text in when x1..y2 were
+        clamped to the frame (a name scrolling out); the text is clipped.
+        """
         text = ann.get('alterego', '').strip()
         if not text:
             return cv_img
@@ -573,8 +580,9 @@ class CanvasWidget(tk.Canvas):
         pil_img = Image.fromarray(cv_rgb)
         draw = ImageDraw.Draw(pil_img)
         
+        tx1, ty1, tx2, ty2 = text_box if text_box is not None else (x1, y1, x2, y2)
         if font_size is None:
-            font_size = fit_alterego_font_size(text, x2 - x1, y2 - y1)
+            font_size = fit_alterego_font_size(text, tx2 - tx1, ty2 - ty1)
         font = load_alterego_font(None, font_size)
         
         # Get text size and center
@@ -585,14 +593,20 @@ class CanvasWidget(tk.Canvas):
         # Account for text baseline offset from textbbox
         baseline_offset_y = bbox_text[1]
         
-        text_x = x1 + (x2 - x1 - text_width) // 2 - bbox_text[0]
-        text_y = y1 + (y2 - y1 - text_height) // 2 - baseline_offset_y
-        
+        text_x = tx1 + (tx2 - tx1 - text_width) // 2 - bbox_text[0]
+        text_y = ty1 + (ty2 - ty1 - text_height) // 2 - baseline_offset_y
+
         # Draw text
         draw.text((text_x, text_y), text, font=font, fill=text_fill)
-        
+
         # Convert back to OpenCV
-        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        out = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        if (tx1, ty1, tx2, ty2) != (x1, y1, x2, y2):
+            # Box runs past the frame edge: keep only the text inside it
+            clipped = cv_img.copy()
+            clipped[y1:y2, x1:x2] = out[y1:y2, x1:x2]
+            return clipped
+        return out
     
     def toggle_hidden_preview(self):
         """Toggle preview mode for hidden annotations."""

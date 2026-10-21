@@ -114,7 +114,7 @@ The `ait` command opens the AiT launcher — the central hub for the three tools
 
 - **Video Processor** — runs the detection pipeline on your video files. Click **Launch Video Processor** to open it.
 - **Annotation Viewer** — lets you review and refine detections before exporting. Select a processed video folder first, then click **Launch Annotation Viewer**.
-- **Export Queue** — exports one or more reviewed videos with blur applied, running them **sequentially** (one at a time). Set the **Blur Strength** (Gaussian kernel size, odd number between 3 and 201 — higher means stronger blur, default 51), then **Add to Queue…** — point it at a single processed folder or a parent holding many (e.g. a mirrored output tree) to enqueue them all at once. See [Export Queue](#export-queue) below for the full workflow.
+- **Export Queue** — exports one or more reviewed videos with blur applied, running them **sequentially** (one at a time). Set the **Blur Strength** (Gaussian kernel size, odd number between 3 and 201 — higher means stronger blur, default 91), then **Add to Queue…** — point it at a single processed folder or a parent holding many (e.g. a mirrored output tree) to enqueue them all at once. See [Export Queue](#export-queue) below for the full workflow.
 
 ---
 
@@ -137,7 +137,7 @@ The Video Processor runs the full detection pipeline on your videos: frame extra
 | Parameter | Description |
 |-----------|-------------|
 | **Frame Step** | Extract every Nth frame (default: `1` = all frames). Use higher values to speed up processing on long videos. Keep in mind that more frames skipped means less accuracy |
-| **OCR Engine** | Choose between **docTR** and **EasyOCR**. **docTR** works best for phone/tablet UIs and documents with clean text rendering. **EasyOCR** is better for real-world videos with varied fonts and backgrounds, but requires specifying the language(s) |
+| **OCR Engine** | Choose between **docTR** and **EasyOCR**. **docTR** works best for phone/tablet UIs and documents with clean text rendering. **EasyOCR** is better for real-world videos with varied fonts and backgrounds, but requires specifying the language(s). **doctr-multilingual** is docTR with a recognizer that also reads Central/Eastern European letters (ć, č, š, ž, ł, ...), which the standard docTR model cannot output; it is about 2x slower and is downloaded from the Hugging Face hub on first use |
 | **OCR Languages** | Only used with EasyOCR. Space-separated language codes, e.g. `en de` for English and German |
 | **SAM3 Device** | `auto` picks the best available accelerator (CUDA > MPS > CPU). You can force a specific device if needed |
 | **SAM3 Prompt** | The text prompt that guides SAM3 segmentation. The default `"profile image, profile picture"` works well for chat recordings |

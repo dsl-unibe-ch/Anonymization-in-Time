@@ -47,7 +47,7 @@ def _compute_frame_similarity(frame_a: np.ndarray, frame_b: np.ndarray) -> float
 # Visualization
 # ---------------------------------------------------------------------------
 
-def _save_images_with_masks(img, results, output_path, mode='color', alpha=0.5, blur_strength=51):
+def _save_images_with_masks(img, results, output_path, mode='color', alpha=0.5, blur_strength=91):
     """Save image with mask overlays — either colored or blurred."""
     COLORS = [
         np.array([1.0, 0.0, 0.0]),
@@ -148,7 +148,7 @@ def _cleanup_intermediate_pickles(output_folder):
 def process_video_sam3(frames_folder, output_folder,
                        text_prompt="profile image, profile picture",
                        device='auto', model_path=None, conf=0.25,
-                       mask_mode='color', blur_strength=51,
+                       mask_mode='color', blur_strength=91,
                        masks_propagation=True, max_gap=5,
                        save_images=False, pad=10):
     """
@@ -387,7 +387,7 @@ def process_video_sam3(frames_folder, output_folder,
 
 def process_videos_sam3_batch(video_folders, text_prompt="profile image, profile picture",
                               device='auto', model_path=None, conf=0.25,
-                              mask_mode='color', blur_strength=51,
+                              mask_mode='color', blur_strength=91,
                               masks_propagation=True, max_gap=5,
                               save_images=False, pad=10):
     """

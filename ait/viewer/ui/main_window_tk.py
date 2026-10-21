@@ -5,6 +5,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
+from ait.frame_files import read_video_info
 from ait.viewer.ui.canvas_widget_tk import CanvasWidget
 from ait.viewer.models.annotation_manager import AnnotationManager
 from ait.viewer.models.transition_manager import TransitionManager
@@ -24,7 +25,9 @@ class MainWindow:
         self.root = root
         self.data_dir = Path(data_dir)
         self.frames_dir = self.data_dir / "frames"
-        
+        info = read_video_info(self.frames_dir) or {}
+        self.fps = info.get("fps") or None  # for the timecode display
+
         # Initialize managers
         self.annotation_manager = AnnotationManager(self.data_dir)
         self.transition_manager = TransitionManager(self.data_dir)
@@ -435,7 +438,7 @@ class MainWindow:
         blur_strength = simpledialog.askinteger(
             "Blur Strength",
             "Enter blur kernel size (must be odd number):",
-            initialvalue=51,
+            initialvalue=91,
             minvalue=3,
             maxvalue=201
         )
@@ -492,6 +495,21 @@ class MainWindow:
             )
             self._update_status("Export failed", timeout=3000)
     
+    def _format_timecode(self, frame_idx: int) -> str:
+        """Video time of a frame as "m:ss + Nf" (e.g. frame 36 at 24 fps -> "0:01 + 12f").
+
+        Frame files are named by their frame number in the source video, so
+        the time follows from the fps in video_info.json. Empty if unknown.
+        """
+        if self.fps is None:
+            return ""
+        seconds = int(frame_idx / self.fps)
+        frames = int(frame_idx - seconds * self.fps + 1e-6)
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        clock = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+        return f"{clock} + {frames}f ({self.fps:g} fps)"
+
     def _update_labels(self, frame_idx: int):
         """Update info labels."""
         # Frame label with transition indicator
@@ -503,8 +521,10 @@ class MainWindow:
         elif self.transition_start_frame is not None:
             transition_status = f" [Marking from {self.transition_start_frame}]"
         
+        timecode = self._format_timecode(frame_idx)
+        timecode = f"{timecode} | " if timecode else ""
         self.frame_label.config(
-            text=f"Frame: {self.current_position + 1} / {frame_count} (Index: {frame_idx}){transition_status}"
+            text=f"{timecode}Frame {frame_idx} | {self.current_position + 1} / {frame_count}{transition_status}"
         )
         
         # Stats label

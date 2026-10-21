@@ -155,7 +155,7 @@ class AiTLauncher:
 
         ttk.Label(blur_frame, text="Blur Strength:").pack(side=tk.LEFT, padx=(0, 5))
 
-        self.blur_strength_var = tk.IntVar(value=51)
+        self.blur_strength_var = tk.IntVar(value=91)
         blur_spinbox = ttk.Spinbox(
             blur_frame,
             from_=3,

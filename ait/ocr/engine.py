@@ -16,7 +16,13 @@ import cv2
 # ---------------------------------------------------------------------------
 _doctr_predictor = None
 _doctr_device = None
+_doctr_multilingual = None  # which recognizer _doctr_predictor holds
 _easyocr_reader = None
+
+# docTR's built-in recognizers all use the French vocab (no ć, č, š, ž, ...).
+# This community checkpoint (by a docTR maintainer) adds Central/Eastern
+# European letters, at roughly twice the recognition time.
+MULTILINGUAL_RECO_HUB_ID = "Felix92/doctr-torch-parseq-multilingual-v1"
 
 
 def _select_device():
@@ -33,16 +39,27 @@ def _select_device():
 # docTR
 # ---------------------------------------------------------------------------
 
-def get_predictor(device=None):
-    """Lazy-init and return the docTR OCR predictor."""
-    global _doctr_predictor, _doctr_device
-    if _doctr_predictor is not None:
+def get_predictor(device=None, multilingual=False):
+    """Lazy-init and return the docTR OCR predictor.
+
+    multilingual: use the multilingual PARSeq recognizer (downloaded from the
+    Hugging Face hub on first use) instead of crnn_vgg16_bn.
+    """
+    global _doctr_predictor, _doctr_device, _doctr_multilingual
+    if _doctr_predictor is not None and _doctr_multilingual == multilingual:
         return _doctr_predictor
 
     from doctr.models import ocr_predictor
     _doctr_device = device or _select_device()
-    _doctr_predictor = ocr_predictor("db_resnet50", "crnn_vgg16_bn", pretrained=True).to(_doctr_device)
-    print(f"docTR predictor loaded on {_doctr_device}")
+    if multilingual:
+        from doctr.models import from_hub
+        reco = from_hub(MULTILINGUAL_RECO_HUB_ID)
+    else:
+        reco = "crnn_vgg16_bn"
+    _doctr_predictor = ocr_predictor("db_resnet50", reco, pretrained=True).to(_doctr_device)
+    _doctr_multilingual = multilingual
+    print(f"docTR predictor loaded on {_doctr_device}"
+          f"{' (multilingual recognizer)' if multilingual else ''}")
     return _doctr_predictor
 
 
@@ -229,9 +246,10 @@ def extract_words_easyocr(image_bgr: np.ndarray, reader=None,
 
 def cleanup():
     """Release GPU memory held by loaded models."""
-    global _doctr_predictor, _doctr_device, _easyocr_reader
+    global _doctr_predictor, _doctr_device, _doctr_multilingual, _easyocr_reader
     _doctr_predictor = None
     _doctr_device = None
+    _doctr_multilingual = None
     _easyocr_reader = None
     try:
         import gc

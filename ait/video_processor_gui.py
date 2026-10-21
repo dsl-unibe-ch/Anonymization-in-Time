@@ -116,9 +116,9 @@ class VideoProcessorGUI:
         ocr_engine_combo = ttk.Combobox(
             params_frame,
             textvariable=self.ocr_engine_var,
-            values=["doctr", "easyocr"],
+            values=["doctr", "doctr-multilingual", "easyocr"],
             state="readonly",
-            width=10
+            width=18
         )
         ocr_engine_combo.grid(row=0, column=3, sticky=tk.W, padx=(10, 0), pady=2)
         ocr_engine_combo.bind("<<ComboboxSelected>>", self._on_ocr_engine_changed)

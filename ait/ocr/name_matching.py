@@ -67,11 +67,20 @@ COMMON_WORDS = {
 }
 
 
+# Letters whose "accent" is part of the glyph, so NFD cannot strip it
+# (OCR reads "Đurđević" as "Durdevic").
+_TRANSLIT = str.maketrans({
+    "đ": "d", "Đ": "D", "ł": "l", "Ł": "L", "ø": "o", "Ø": "O",
+    "ħ": "h", "Ħ": "H", "ı": "i", "ß": "ss", "ẞ": "SS",
+    "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE",
+})
+
+
 def normalize(text: str) -> str:
     """Lowercase, strip diacritics and surrounding punctuation."""
     if not text:
         return ""
-    text = unicodedata.normalize("NFD", text)
+    text = unicodedata.normalize("NFD", text.translate(_TRANSLIT))
     text = "".join(c for c in text if unicodedata.category(c) != "Mn")
     return text.lower().strip().strip(".,;:!?()\"'-")
 

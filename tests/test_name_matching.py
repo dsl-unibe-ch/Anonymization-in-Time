@@ -49,6 +49,14 @@ class WordMatchTest(unittest.TestCase):
         self.assertTrue(matches("SMITH:", "smith"))
         self.assertTrue(matches("Müller", "muller"))
 
+    def test_accents_ocr_reads_as_plain_letters(self):
+        self.assertTrue(matches("Cosic", "Ćosić"))
+        self.assertTrue(matches("Kovacevic", "Kovačević"))
+        # đ, ł, ß are distinct letters (NFD leaves them alone): transliterated
+        self.assertTrue(matches("Durda", "Đurđa"))
+        self.assertTrue(matches("Lukasz", "Łukasz"))
+        self.assertTrue(matches("Strasse", "Straße"))
+
     def test_one_typo_in_mid_length_names(self):
         # previously missed: similarity (n-1)/n < 0.85 for 5-6 letters
         self.assertTrue(matches("Smlth", "smith"))

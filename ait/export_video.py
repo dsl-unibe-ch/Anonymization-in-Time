@@ -20,7 +20,7 @@ from ait.utils import (rebuild_full_mask, shared_alterego_font_sizes,
 from ait.frame_files import VIDEO_INFO_NAME, list_frame_files, read_video_info
 
 
-def apply_blur_to_region(image, mask, blur_strength=51):
+def apply_blur_to_region(image, mask, blur_strength=91):
     """
     Apply Gaussian blur to a region of the image defined by a mask.
     
@@ -46,7 +46,7 @@ def apply_blur_to_region(image, mask, blur_strength=51):
 
 
 def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2,
-                              font_path=None, font_size=None):
+                              font_path=None, font_size=None, text_box=None):
     """
     Add replacement text with color matching using PIL.
 
@@ -57,6 +57,9 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2,
         x1, y1, x2, y2: Text region coordinates
         font_path: Path to custom font file (optional)
         font_size: If provided, use this exact font size (otherwise auto-fit)
+        text_box: Unclamped (x1, y1, x2, y2) to position the text in, for a box
+                  running past the frame edge (a name scrolling out); the text
+                  is then clipped to x1, y1, x2, y2 (the clamped region)
 
     Returns:
         Frame with custom text overlaid
@@ -111,27 +114,33 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2,
     pil_image = Image.fromarray(frame_rgb)
     draw = ImageDraw.Draw(pil_image)
     
+    tx1, ty1, tx2, ty2 = text_box if text_box is not None else (x1, y1, x2, y2)
     if font_size is None:
-        font_size = fit_alterego_font_size(text, x2 - x1, y2 - y1, font_path)
+        font_size = fit_alterego_font_size(text, tx2 - tx1, ty2 - ty1, font_path)
     font = load_alterego_font(font_path, font_size)
-    
+
     # Get text bounding box for centering
     bbox_text = draw.textbbox((0, 0), text, font=font)
     text_width = bbox_text[2] - bbox_text[0]
     text_height = bbox_text[3] - bbox_text[1]
-    
+
     # Account for text baseline offset from textbbox
     baseline_offset_y = bbox_text[1]
-    
+
     # Calculate center position
-    text_x = x1 + (x2 - x1 - text_width) // 2 - bbox_text[0]
-    text_y = y1 + (y2 - y1 - text_height) // 2 - baseline_offset_y
-    
+    text_x = tx1 + (tx2 - tx1 - text_width) // 2 - bbox_text[0]
+    text_y = ty1 + (ty2 - ty1 - text_height) // 2 - baseline_offset_y
+
     # Draw main text
     draw.text((text_x, text_y), text, font=font, fill=text_fill)
-    
+
     # Convert back to OpenCV format (RGB to BGR)
     frame_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    if (tx1, ty1, tx2, ty2) != (x1, y1, x2, y2):
+        # Box runs past the frame edge: keep only the text inside it
+        clipped = frame.copy()
+        clipped[y1:y2, x1:x2] = frame_bgr[y1:y2, x1:x2]
+        return clipped
     return frame_bgr
 
 
@@ -244,7 +253,7 @@ def resolve_sam3_file(video_dir, sam3_source="auto"):
     return sam3_file
 
 
-def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
+def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
                            ocr_blur=True, sam3_blur=True, transition_blur=True,
                            fps=None, codec='mp4v', font_path=None,
                            sam3_source='auto'):
@@ -480,6 +489,7 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=51,
                 frame = add_custom_text_to_frame(
                     frame, ann, original_patch, x1, y1, x2, y2,
                     font_path, font_size=group_sizes.get(id(ann)),
+                    text_box=tuple(ann['bbox']),
                 )
         
         # Write frame to video
@@ -503,8 +513,8 @@ def main():
                        help='Directory containing frames/, ocr.pkl, sam3.pkl, transitions.txt')
     parser.add_argument('--output', type=str, required=True,
                        help='Output video file path (e.g., output.mp4)')
-    parser.add_argument('--blur_strength', type=int, default=51,
-                       help='Gaussian blur kernel size (must be odd, default: 51)')
+    parser.add_argument('--blur_strength', type=int, default=91,
+                       help='Gaussian blur kernel size (must be odd, default: 91)')
     parser.add_argument('--fps', type=float, default=None,
                        help='Output video FPS (default: auto-detect or 30)')
     parser.add_argument('--codec', type=str, default='mp4v',

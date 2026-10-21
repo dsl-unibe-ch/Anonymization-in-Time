@@ -15,7 +15,7 @@ positional lag.
 from __future__ import annotations
 
 import numpy as np
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from .name_matching import normalize
 
@@ -24,6 +24,31 @@ from .name_matching import normalize
 # Track assignment (greedy nearest-neighbour matching)
 # ---------------------------------------------------------------------------
 
+def _scroll_shift(active_tracks: dict, current: list, min_shift: int = 4,
+                  min_pairs: int = 3) -> tuple:
+    """
+    Dominant motion (dx, dy) of the moving text between the previous and the
+    current frame, or (0, 0) if there is none.
+
+    Pairs up texts that occur exactly once in both frames, without any
+    distance limit, and takes the median displacement of the pairs that moved
+    -- static header/footer text is left out, so a scrolling list still
+    shows up.
+    """
+    counts = Counter(t for _, t, _, _ in current)
+    moved = []
+    for _, text, cx, cy in current:
+        prev = active_tracks.get(text, [])
+        if counts[text] == 1 and len(prev) == 1:
+            dx, dy = cx - prev[0][0], cy - prev[0][1]
+            if dx * dx + dy * dy >= min_shift * min_shift:
+                moved.append((dx, dy))
+    if len(moved) < min_pairs:
+        return (0, 0)
+    dx, dy = np.median(moved, axis=0)
+    return (float(dx), float(dy))
+
+
 def _assign_tracks(frame_boxes: dict, max_dist: int = 80) -> dict:
     """
     Assign integer track IDs to boxes across frames.
@@ -31,7 +56,9 @@ def _assign_tracks(frame_boxes: dict, max_dist: int = 80) -> dict:
     Two boxes in consecutive frames get the same track_id if:
       - Their normalized name/text matches exactly
       - They are the closest pair (by Euclidean center distance) among
-        all candidates with the same text, within max_dist pixels
+        all candidates with the same text, within max_dist pixels -- of the
+        previous position, or of where the frame's scroll moved it (so a
+        fast swipe does not split tracks)
 
     Uses distance-based matching to handle duplicate names correctly
     (e.g. three "Arch" boxes at different positions).
@@ -66,6 +93,7 @@ def _assign_tracks(frame_boxes: dict, max_dist: int = 80) -> dict:
         # by closest distance (Hungarian-lite: greedy closest-first)
         texts_in_frame = set(t for _, t, _, _ in current)
         text_assignments: dict[int, int] = {}  # box index -> track_id
+        sdx, sdy = _scroll_shift(active_tracks, current)
 
         for text in texts_in_frame:
             prev_entries = active_tracks.get(text, [])
@@ -83,7 +111,8 @@ def _assign_tracks(frame_boxes: dict, max_dist: int = 80) -> dict:
             for ci in curr_indices:
                 _, _, cx, cy = current[ci]
                 for pi, (px, py, ptid) in enumerate(prev_entries):
-                    dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+                    dist = min(((cx - px) ** 2 + (cy - py) ** 2) ** 0.5,
+                               ((cx - px - sdx) ** 2 + (cy - py - sdy) ** 2) ** 0.5)
                     pairs.append((dist, ci, pi, ptid))
             pairs.sort()
 

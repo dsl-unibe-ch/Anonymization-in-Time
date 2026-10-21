@@ -5,6 +5,7 @@ Wires together:
   engine.py        — docTR word extraction
   name_matching.py — name detection
   stabilization.py — anchor-based coordinate stabilization
+  scroll_extension.py — names kept on while scrolling out of / into view
   format.py        — unified output format
 
 Public API:
@@ -25,8 +26,10 @@ from .engine import (get_predictor, extract_words,
                      cleanup as cleanup_engine)
 from .name_matching import filter_by_names
 from .stabilization import stabilize
+from .scroll_extension import extend_scrolling_names
 from .format import to_unified
 
+from ait.frame_files import list_frame_files
 from ait.utils import extract_video_frames
 
 
@@ -59,7 +62,7 @@ def _run_ocr_on_frames(frames_dir: Path,
     Run OCR on every frame in frames_dir, skipping visually unchanged frames.
 
     Args:
-        ocr_engine: "doctr" or "easyocr"
+        ocr_engine: "doctr", "doctr-multilingual" or "easyocr"
         languages:  Language list for EasyOCR (ignored by docTR)
 
     Returns:
@@ -85,7 +88,7 @@ def _run_ocr_on_frames(frames_dir: Path,
                                          min_confidence=min_confidence,
                                          min_area=min_area)
     else:
-        predictor = get_predictor()
+        predictor = get_predictor(multilingual=(engine == "doctr-multilingual"))
         def _extract(frame):
             return extract_words(frame, predictor=predictor,
                                  min_confidence=min_confidence,
@@ -264,7 +267,8 @@ def process_video_ocr(video_path, output_dir, dict_path,
         languages:        Language list for EasyOCR (ignored by docTR).
         extract_frames:   Whether to extract frames (set False to reuse existing).
         frame_step:       Extract every N-th frame.
-        ocr_engine:       "doctr" (default) or "easyocr".
+        ocr_engine:       "doctr" (default), "doctr-multilingual" (reads
+                          ć, č, š, ž, ...; ~2x slower) or "easyocr".
 
     Returns:
         dict: Unified OCR data {frame_idx: [box, ...]}.
@@ -323,6 +327,13 @@ def process_video_ocr(video_path, output_dir, dict_path,
     with open(dict_path, "r", encoding="utf-8") as f:
         names_dict = json.load(f)
     annotated_boxes = filter_by_names(frame_boxes, names_dict)
+
+    # --- Step 5b: carry names on while they scroll out of / into view ---
+    frame_files = list_frame_files(frames_dir)
+    first_frame = cv2.imread(str(frame_files[0])) if frame_files else None
+    if first_frame is not None:
+        height, width = first_frame.shape[:2]
+        annotated_boxes = extend_scrolling_names(annotated_boxes, (width, height))
 
     # --- Step 6: convert to unified output format ---
     unified = to_unified(annotated_boxes)

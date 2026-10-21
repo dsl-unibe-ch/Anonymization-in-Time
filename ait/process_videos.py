@@ -102,7 +102,7 @@ def process_single_video(video_path, output_base_dir, dict_path,
         sam3_batch_size (int): Batch size for SAM3 inference
         sam3_device (str): Device for SAM3 ('auto', 'cuda', 'mps', or 'cpu')
         frame_step (int): Step between frames to extract
-        ocr_engine (str): OCR backend ('doctr' or 'easyocr')
+        ocr_engine (str): OCR backend ('doctr', 'doctr-multilingual' or 'easyocr')
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
@@ -215,7 +215,7 @@ def process_single_video(video_path, output_base_dir, dict_path,
                 device=sam3_device_resolved,
                 model_path=sam3_model_path,
                 mask_mode='color',
-                blur_strength=51,
+                blur_strength=91,
                 masks_propagation=True,
                 max_gap=5,
                 save_images=False
@@ -291,7 +291,7 @@ def process_multiple_videos(video_paths, output_base_dir, dict_path,
         sam3_batch_size (int): Batch size for SAM3 inference
         sam3_device (str): Device for SAM3 ('auto', 'cuda', 'mps', or 'cpu')
         frame_step (int): Step between frames to extract
-        ocr_engine (str): OCR backend ('doctr' or 'easyocr')
+        ocr_engine (str): OCR backend ('doctr', 'doctr-multilingual' or 'easyocr')
         run_ocr (bool): Whether to run OCR processing
         run_sam3 (bool): Whether to run SAM3 processing
         run_transitions (bool): Whether to run transition detection
@@ -393,8 +393,8 @@ def main():
                        help='Languages for OCR (default: en de)')
     parser.add_argument('--ocr_workers', type=int, default=4,
                        help='Number of parallel workers for OCR (default: 4)')
-    parser.add_argument('--ocr_engine', type=str, default='doctr', choices=['doctr', 'easyocr'],
-                       help='OCR backend to use (default: doctr)')
+    parser.add_argument('--ocr_engine', type=str, default='doctr', choices=['doctr', 'doctr-multilingual', 'easyocr'],
+                       help='OCR backend to use (default: doctr; doctr-multilingual reads accented letters like ć, č, š, ž but is ~2x slower)')
     
     # SAM3 options
     parser.add_argument('--sam3_prompt', type=str, default="profile image, profile picture",
