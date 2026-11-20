@@ -1,3 +1,4 @@
+import bisect
 import subprocess
 import cv2
 import os
@@ -136,6 +137,91 @@ def track_alterego_font_sizes(ocr_annotations, per_box_size_fn):
                 continue
             fits[(track_id, alterego)].append(per_box_size_fn(ann))
     return {key: statistics.median_low(values) for key, values in fits.items()}
+
+
+def stabilized_text_boxes(ocr_annotations, window=5):
+    """
+    Steadier boxes to draw the alterego in, one per OCR annotation.
+
+    A track's detected box wobbles by 1-3 px between frames (sometimes much
+    more) in position and size, and the alterego, centred in it, jumped with
+    it; where one name is split into word boxes, the split point moved too.
+    The page's scroll per frame is measured as the median movement of all
+    tracks between consecutive frames. Each box then gets the median width,
+    height and position relative to the page of the same track's boxes
+    within +-window frames, moved with the page: it follows (even uneven)
+    scrolling without lagging, and words of one name stay steady relative to
+    each other. Only used for placing the text: the hidden region stays the
+    detected box.
+
+    Args:
+        ocr_annotations: {frame_idx: [OCR annotation dict, ...]}
+        window: frames on each side to take the median over.
+
+    Returns:
+        dict mapping id(annotation) -> (x1, y1, x2, y2). Annotations without a
+        track_id or hidden ones are not included.
+    """
+    frames = sorted(ocr_annotations)
+    page = _page_offsets(ocr_annotations, frames)
+
+    by_track = defaultdict(list)
+    for frame_idx in frames:
+        for ann in ocr_annotations[frame_idx]:
+            if ann.get("track_id") is None or not ann.get("to_show", True) or not ann.get("bbox"):
+                continue
+            by_track[ann["track_id"]].append((frame_idx, ann))
+    boxes = {}
+    for entries in by_track.values():
+        track_frames = [f for f, _ in entries]
+        for frame_idx, ann in entries:
+            lo = bisect.bisect_left(track_frames, frame_idx - window)
+            hi = bisect.bisect_right(track_frames, frame_idx + window)
+            near = entries[lo:hi]
+            bb = np.array([a["bbox"] for _, a in near], dtype=np.float64)
+            off = np.array([page[f] for f, _ in near])
+            here = page[frame_idx]
+            w = float(np.median(bb[:, 2] - bb[:, 0]))
+            h = float(np.median(bb[:, 3] - bb[:, 1]))
+            cx = _steady((bb[:, 0] + bb[:, 2]) / 2, off[:, 0], here[0])
+            cy = _steady((bb[:, 1] + bb[:, 3]) / 2, off[:, 1], here[1])
+            boxes[id(ann)] = (int(round(cx - w / 2)), int(round(cy - h / 2)),
+                              int(round(cx + w / 2)), int(round(cy + h / 2)))
+    return boxes
+
+
+def _page_offsets(ocr_annotations, frames):
+    """
+    Cumulative page scroll (x, y) per frame: the median movement, between
+    consecutive frames, of all OCR tracks present in both (shown or not).
+    """
+    page, prev, total = {}, {}, np.zeros(2)
+    for frame_idx in frames:
+        cur = {}
+        for ann in ocr_annotations[frame_idx]:
+            if ann.get("track_id") is not None and ann.get("bbox"):
+                x1, y1, x2, y2 = ann["bbox"]
+                cur[ann["track_id"]] = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
+        moves = [cur[t] - prev[t] for t in cur.keys() & prev.keys()]
+        if moves:
+            total = total + np.median(np.stack(moves), axis=0)
+        page[frame_idx] = total.copy()
+        prev = cur
+    return page
+
+
+def _steady(centres, page_offsets, page_here):
+    """
+    Steady centre for the middle frame of a window: the median position
+    either relative to the page (for scrolling text) or absolute (for text
+    that stays put, like a chat title over a scrolling chat), whichever
+    explains the window's positions better.
+    """
+    relative = centres - page_offsets
+    rel_med, abs_med = np.median(relative), np.median(centres)
+    if np.median(np.abs(relative - rel_med)) <= np.median(np.abs(centres - abs_med)):
+        return float(rel_med + page_here)
+    return float(abs_med)
 
 ######### VIDEO LOADING & SAVING #########
 

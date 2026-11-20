@@ -16,10 +16,41 @@ from PIL import Image, ImageDraw, ImageFont
 
 from ait.utils import (rebuild_full_mask, shared_alterego_font_sizes,
                        track_alterego_font_sizes, load_alterego_font,
-                       fit_alterego_font_size)
+                       fit_alterego_font_size, stabilized_text_boxes)
 from ait.frame_files import VIDEO_INFO_NAME, list_frame_files, read_video_info
 from ait.obfuscation import (DEFAULT_METHOD, IMAGE_DEFAULT, METHODS, TEXT_DEFAULT,
-                             infer_text_color, obfuscate_region, obfuscate_regions)
+                             infer_text_color, obfuscate_region, obfuscate_regions,
+                             text_core_color, track_text_color)
+
+
+def track_text_colors(ocr_annotations, frame_files):
+    """
+    One alterego colour per OCR track (median of its frames' ink colours,
+    then snapped), read in a pass over the frames that have shown names.
+
+    Returns:
+        dict mapping track_id -> BGR colour.
+    """
+    files = {int(''.join(filter(str.isdigit, f.stem))): f for f in frame_files}
+    samples = {}
+    for frame_idx in sorted(ocr_annotations):
+        anns = [a for a in ocr_annotations[frame_idx]
+                if a.get('to_show', True) and a.get('bbox')
+                and a.get('track_id') is not None and (a.get('alterego') or '').strip()]
+        if not anns or frame_idx not in files:
+            continue
+        frame = cv2.imread(str(files[frame_idx]))
+        if frame is None:
+            continue
+        h, w = frame.shape[:2]
+        for a in anns:
+            x1, y1, x2, y2 = a['bbox']
+            x1, x2 = max(0, min(x1, w)), max(0, min(x2, w))
+            y1, y2 = max(0, min(y1, h)), max(0, min(y2, h))
+            if x2 > x1 and y2 > y1:
+                samples.setdefault(a['track_id'], []).append(
+                    text_core_color(frame[y1:y2, x1:x2]))
+    return {t: track_text_color(c) for t, c in samples.items()}
 
 
 def apply_blur_to_region(image, mask, blur_strength=91, method=DEFAULT_METHOD):
@@ -34,7 +65,8 @@ def apply_blur_to_region(image, mask, blur_strength=91, method=DEFAULT_METHOD):
 
 
 def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2,
-                              font_path=None, font_size=None, text_box=None):
+                              font_path=None, font_size=None, text_box=None,
+                              text_color=None):
     """
     Add replacement text with color matching using PIL.
 
@@ -47,7 +79,9 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2,
         font_size: If provided, use this exact font size (otherwise auto-fit)
         text_box: Unclamped (x1, y1, x2, y2) to position the text in, for a box
                   running past the frame edge (a name scrolling out); the text
-                  is then clipped to x1, y1, x2, y2 (the clamped region)
+                  is then clipped to that box within the frame
+        text_color: BGR colour to use (e.g. one per track, see
+                    track_text_colors); inferred from original_patch if None
 
     Returns:
         Frame with custom text overlaid
@@ -63,7 +97,7 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2,
     text = str(text)
     
     # Infer text color from original patch (coarsely, see infer_text_color)
-    text_color_bgr = infer_text_color(original_patch, fallback=(0, 0, 0))
+    text_color_bgr = text_color or infer_text_color(original_patch, fallback=(0, 0, 0))
     text_fill = (text_color_bgr[2], text_color_bgr[1], text_color_bgr[0], 255)  # BGR to RGBA
     
     # Convert OpenCV frame (BGR) to PIL Image (RGB)
@@ -94,9 +128,13 @@ def add_custom_text_to_frame(frame, bbox, original_patch, x1, y1, x2, y2,
     # Convert back to OpenCV format (RGB to BGR)
     frame_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
     if (tx1, ty1, tx2, ty2) != (x1, y1, x2, y2):
-        # Box runs past the frame edge: keep only the text inside it
+        # Text box differs from the region (runs past the frame edge, or is a
+        # steadied box): keep only the text inside the text box, in the frame
+        h, w = frame.shape[:2]
+        cx1, cx2 = max(0, min(tx1, w)), max(0, min(tx2, w))
+        cy1, cy2 = max(0, min(ty1, h)), max(0, min(ty2, h))
         clipped = frame.copy()
-        clipped[y1:y2, x1:x2] = frame_bgr[y1:y2, x1:x2]
+        clipped[cy1:cy2, cx1:cx2] = frame_bgr[cy1:cy2, cx1:cx2]
         return clipped
     return frame_bgr
 
@@ -350,6 +388,10 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
                                            ann['bbox'][2] - ann['bbox'][0],
                                            ann['bbox'][3] - ann['bbox'][1], font_path),
     ) if ocr_blur else {}
+    # One alterego colour per track, and steadier boxes to draw it in: both
+    # flickered when taken from each frame's own (noisy, wobbling) box.
+    track_colors = track_text_colors(ocr_annotations, frame_files) if ocr_blur else {}
+    text_boxes = stabilized_text_boxes(ocr_annotations) if ocr_blur else {}
 
     # Setup video writer
     fourcc = cv2.VideoWriter_fourcc(*codec)
@@ -464,7 +506,8 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
                 frame = add_custom_text_to_frame(
                     frame, ann, original_patch, x1, y1, x2, y2,
                     font_path, font_size=group_sizes.get(id(ann)),
-                    text_box=tuple(ann['bbox']),
+                    text_box=text_boxes.get(id(ann), tuple(ann['bbox'])),
+                    text_color=track_colors.get(ann.get('track_id')),
                 )
         
         # Write frame to video

@@ -120,26 +120,55 @@ def infer_text_color(patch, fallback=(0, 0, 0)):
     tools/blur_attack.py ranked candidates by it. So only the strongest ink
     pixels are used (solid text has one colour there whatever the letters)
     and the result is snapped to a coarse grid.
+
+    In a video, prefer track_text_color over a whole track: per frame, video
+    noise can push a colour across a snapping boundary and the alterego
+    flickers between two shades.
     """
+    color = text_core_color(patch)
+    return fallback if color is None else snap_text_color(color)
+
+
+def text_core_color(patch):
+    """Unsnapped median BGR colour of the strongest ink pixels, or None."""
     if patch is None or patch.size == 0:
-        return fallback
+        return None
     try:
         gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
     except cv2.error:
-        return fallback
+        return None
     if gray.size == 0:
-        return fallback
+        return None
     _, binary = cv2.threshold(cv2.GaussianBlur(gray, (3, 3), 0), 0, 255,
                               cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     is_text = binary == (0 if np.count_nonzero(binary == 0) < binary.size / 2 else 255)
     if np.count_nonzero(is_text) < 5 or np.count_nonzero(~is_text) < 1:
-        return fallback
+        return None
     background = float(np.median(gray[~is_text]))
     contrast = np.abs(gray[is_text].astype(np.float32) - background)
     core = patch[is_text][contrast >= np.percentile(contrast, 90)]
-    color = np.median(core, axis=0)
-    snapped = np.clip(np.round(color / _COLOR_STEP) * _COLOR_STEP, 0, 255)
-    return tuple(int(c) for c in snapped)
+    return np.median(core, axis=0)
+
+
+def snap_text_color(color):
+    """
+    Snap brightness to steps of _COLOR_STEP and each channel's offset from it
+    to steps of _COLOR_STEP / 2. Snapping channels independently turned greys
+    near a step boundary into tinted greys like (160, 128, 128).
+    """
+    color = np.asarray(color, np.float64)
+    gray = color.mean()
+    level = np.round(gray / _COLOR_STEP) * _COLOR_STEP
+    offset = np.round((color - gray) / (_COLOR_STEP / 2)) * (_COLOR_STEP / 2)
+    return tuple(int(c) for c in np.clip(level + offset, 0, 255))
+
+
+def track_text_color(core_colors, fallback=(0, 0, 0)):
+    """One snapped colour for a whole track, from its per-frame core colours."""
+    core_colors = [c for c in core_colors if c is not None]
+    if not core_colors:
+        return fallback
+    return snap_text_color(np.median(np.stack(core_colors), axis=0))
 
 
 def obfuscate_region(image, mask, strength=91, method=DEFAULT_METHOD):
