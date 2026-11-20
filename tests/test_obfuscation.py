@@ -35,7 +35,7 @@ class ObfuscationTest(unittest.TestCase):
 
     def test_safe_methods_do_not_depend_on_hidden_pixels(self):
         a, b, m = self._two_secrets()
-        for method in ("inpaint", "flat"):
+        for method in ("shade", "inpaint", "flat"):
             with self.subTest(method=method):
                 np.testing.assert_array_equal(
                     obfuscate_region(a, m, 31, method), obfuscate_region(b, m, 31, method))
@@ -47,7 +47,7 @@ class ObfuscationTest(unittest.TestCase):
 
     def test_pixels_outside_mask_unchanged(self):
         img, m = _scene(2), _mask()
-        for method in ("inpaint", "flat", "blur"):
+        for method in ("shade", "inpaint", "flat", "blur"):
             out = obfuscate_region(img, m, 51, method)
             np.testing.assert_array_equal(out[~m], img[~m])
 
@@ -62,6 +62,17 @@ class ObfuscationTest(unittest.TestCase):
         np.testing.assert_array_equal(out, img)
         self.assertIsNot(out, img)
         obfuscate_region(img, _mask(), 90)   # even kernel is made odd
+
+    def test_shade_darkens_light_and_lightens_dark_backgrounds(self):
+        m = np.zeros((60, 60), bool)
+        m[20:40, 10:50] = True
+        for bg, darker in ((235, True), (30, False)):
+            img = np.full((60, 60, 3), bg, np.uint8)
+            img[m] = 255 - bg                      # hidden text
+            out = obfuscate_region(img, m, 91, "shade")
+            centre, edge = int(out[30, 30, 0]), int(out[20, 10, 0])
+            self.assertLessEqual(abs(edge - bg), 3)   # blends into the edge
+            self.assertTrue(centre < bg - 20 if darker else centre > bg + 20)
 
     def test_full_frame_mask_does_not_crash(self):
         img = _scene(5)

@@ -7,17 +7,24 @@ of candidates (the names in a chat, the members' profile pictures) can render
 each candidate, apply the same blur and pick the closest match. See
 ``tools/blur_attack.py`` for a measurement.
 
-The default method here throws the content away first: the masked region is
-refilled from the pixels around it (which the viewer sees anyway), and only
-then blurred, so the output inside the mask carries no information about what
-was there. Only the mask's shape and position remain.
+The safe methods here throw the content away first: the masked region is
+refilled from the pixels around it (which the viewer sees anyway). The default
+'shade' then darkens it toward the centre in a shape computed from the mask
+alone, so it still reads as a blurred blob; 'inpaint' blurs the refill. Either
+way the output inside the mask carries no information about what was there.
+Only the mask's shape and position remain.
 """
 
 import cv2
 import numpy as np
 
-METHODS = ("inpaint", "flat", "blur")
-DEFAULT_METHOD = "inpaint"
+METHODS = ("shade", "inpaint", "flat", "blur")
+DEFAULT_METHOD = "shade"
+
+# 'shade': how much the centre of a region moves toward black (on a light
+# background) or white (on a dark one).
+_SHADE_AMOUNT = 0.3
+_DARK_BACKGROUND = 110
 
 # Pixels next to the mask (anti-aliased glyph edges, avatar rims) are not used
 # as fill sources, so they do not smear streaks into the region.
@@ -56,6 +63,39 @@ def _fill_from_surroundings(image, mask):
     m = grown[y0:y1, x0:x1].astype(np.uint8) * 255
     out[y0:y1, x0:x1] = cv2.inpaint(crop, m, _INPAINT_RADIUS, cv2.INPAINT_TELEA)
     return out
+
+
+def _shade(filled, mask):
+    """
+    Darken (or lighten) each masked region toward its centre: a soft blob
+    whose shape comes from the mask alone and whose colour comes from the
+    surrounding fill, so it looks blurred without depending on the content.
+    """
+    m8 = mask.astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(m8, connectivity=8)
+    dist = cv2.distanceTransform(m8, cv2.DIST_L2, 5)
+    out = filled.astype(np.float32)
+    for i in range(1, n):
+        x, y, w, h = stats[i, :4]
+        comp = labels[y:y + h, x:x + w] == i
+        d = np.where(comp, dist[y:y + h, x:x + w], 0).astype(np.float32)
+        depth = float(d.max())
+        if depth <= 0:
+            continue
+        # Smooth the distance ridge into a dome, then pin it to 0 at the edge.
+        s = max(1.0, depth / 2)
+        pad = int(3 * s) + 1
+        p = cv2.GaussianBlur(np.pad(d / depth, pad), (0, 0), s)[pad:-pad, pad:-pad]
+        p *= np.clip(d / max(2.0, 0.3 * depth), 0, 1)
+        p /= max(float(p[comp].max()), 1e-6)
+        p = (p * p * (3 - 2 * p))[comp][:, None] * _SHADE_AMOUNT
+        region = out[y:y + h, x:x + w]
+        px = region[comp]
+        if float(px.mean()) >= _DARK_BACKGROUND:
+            region[comp] = px * (1 - p)
+        else:
+            region[comp] = px + (255 - px) * p
+    return np.clip(np.round(out), 0, 255).astype(np.uint8)
 
 
 _COLOR_STEP = 32
@@ -99,15 +139,18 @@ def obfuscate_region(image, mask, strength=91, method=DEFAULT_METHOD):
     Args:
         image: BGR uint8 image (not modified).
         mask: Boolean (H, W) mask of the pixels to hide.
-        strength: Gaussian kernel size (made odd) for the soft look.
-        method: 'inpaint' (default: refill from the surroundings, then blur),
+        strength: Gaussian kernel size (made odd) for the soft look (not used
+            by 'shade', whose softness follows the size of each region).
+        method: 'shade' (default: refill from the surroundings, then shade
+            toward the centre in a shape that depends only on the mask),
+            'inpaint' (refill from the surroundings, then blur),
             'flat' (fill with a neutral gray, then blur), or 'blur' (legacy
             Gaussian blur of the original pixels; can be matched against
             candidates, kept only for comparison).
 
     Returns:
-        New image. For 'inpaint' and 'flat' the pixels inside the mask do not
-        depend on the original pixels inside the mask.
+        New image. For 'shade', 'inpaint' and 'flat' the pixels inside the
+        mask do not depend on the original pixels inside the mask.
     """
     if method not in METHODS:
         raise ValueError(f"Unknown obfuscation method {method!r}; use one of {METHODS}")
@@ -117,6 +160,10 @@ def obfuscate_region(image, mask, strength=91, method=DEFAULT_METHOD):
         return result
     k = _odd(strength)
 
+    if method == "shade":
+        filled = _fill_from_surroundings(image, mask)
+        result[mask] = _shade(filled, mask)[mask]
+        return result
     if method == "blur":
         source = image
     elif method == "flat":

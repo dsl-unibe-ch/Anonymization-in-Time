@@ -79,6 +79,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--strength", type=int, default=91)
     ap.add_argument("--zoom", type=float, default=1.0)
+    ap.add_argument("--only", default="",
+                    help="comma-separated panels to show, e.g. original,blur,shade")
     args = ap.parse_args()
 
     video_dir = Path(args.video_dir)
@@ -92,7 +94,11 @@ def main():
               ("pixelate", "Pixelate 8 px"),
               ("flat", f"Flat gray + blur k={k}"),
               ("inpaint", f"Inpaint + blur k={k}"),
+              ("shade", "Shade (new default)"),
               ("fullframe", f"Transition: full frame k={3 * k}")]
+    if args.only:
+        keep = args.only.split(",")
+        panels = [p for p in panels if p[0] in keep]
     tiles = []
     for method, title in panels:
         img = render(frame, anns, method, k)

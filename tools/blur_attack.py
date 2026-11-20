@@ -210,7 +210,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--trials", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--methods", default="blur,pixelate,fullframe,flat,inpaint",
+    ap.add_argument("--methods", default="blur,pixelate,fullframe,flat,inpaint,shade",
                     help="comma-separated subset to run")
     ap.add_argument("--no-avatars", action="store_true")
     args = ap.parse_args()
@@ -218,11 +218,12 @@ def main():
     wanted = set(args.methods.split(","))
     configs = [(m, k) for m, k in
                [("blur", 31), ("blur", 51), ("blur", 91), ("blur", 151),
-                ("pixelate", 0), ("fullframe", 91), ("flat", 91), ("inpaint", 91)]
+                ("pixelate", 0), ("fullframe", 91), ("flat", 91), ("inpaint", 91),
+                ("shade", 91)]
                if m in wanted]
     label = {"blur": "gaussian blur k={k}", "pixelate": "pixelate",
              "fullframe": "full-frame blur k={k3}", "flat": "flat gray + blur k={k}",
-             "inpaint": "inpaint + blur k={k}"}
+             "inpaint": "inpaint + blur k={k}", "shade": "shade"}
 
     print(f"NAMES: {POOL} candidates; top-1 / top-5 vs box-only baseline")
     for scale, desc in ((0.5, "small text ~12 px (360p-like)"),
