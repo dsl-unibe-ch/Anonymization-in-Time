@@ -502,9 +502,9 @@ class CanvasWidget(tk.Canvas):
         
         # Apply blur
         if blur_mask.any():
-            kernel_size = 91  # Match export blur strength
-            blurred = cv2.GaussianBlur(cv_img, (kernel_size, kernel_size), 0)
-            cv_img[blur_mask] = blurred[blur_mask]
+            from ait.obfuscation import obfuscate_region
+            # Same method as the export default, at the default strength.
+            cv_img = obfuscate_region(cv_img, blur_mask, 91)
         
         # Uniform font size per matched name — so adjacent words of one
         # alterego render at the same visual size.
@@ -544,35 +544,9 @@ class CanvasWidget(tk.Canvas):
         # Ensure it's a proper Unicode string
         text = str(text)
         
-        # Infer text color from original patch
-        def infer_color(patch):
-            if patch is None or patch.size == 0:
-                return (0, 0, 0)
-            try:
-                gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
-                blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-                _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                
-                count_255 = np.count_nonzero(binary)
-                count_0 = binary.size - count_255
-                text_value = 0 if count_0 < count_255 else 255
-                
-                text_mask = binary == text_value
-                if np.count_nonzero(text_mask) < 5:
-                    text_mask = binary != text_value
-                    if np.count_nonzero(text_mask) < 5:
-                        return (0, 0, 0)
-                
-                text_pixels = patch[text_mask]
-                if text_pixels.size == 0:
-                    return (0, 0, 0)
-                
-                mean_bgr = np.mean(text_pixels, axis=0)
-                return tuple(int(np.clip(c, 0, 255)) for c in mean_bgr)
-            except:
-                return (0, 0, 0)
-        
-        text_color_bgr = infer_color(original_patch)
+        # Infer text color from original patch (same as the export)
+        from ait.obfuscation import infer_text_color
+        text_color_bgr = infer_text_color(original_patch)
         text_fill = (text_color_bgr[2], text_color_bgr[1], text_color_bgr[0], 255)
         
         # Convert to PIL for text rendering
