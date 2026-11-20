@@ -18,6 +18,13 @@ from pathlib import Path
 from typing import Optional
 
 
+# Mirrors ait.obfuscation.METHODS / TEXT_DEFAULT / IMAGE_DEFAULT (kept here so
+# this module stays free of OpenCV imports; a test checks they match).
+OBFUSCATION_METHODS = ("shade", "inpaint", "flat", "blur")
+TEXT_METHOD_DEFAULT = "inpaint"
+IMAGE_METHOD_DEFAULT = "shade"
+
+
 class ItemStatus:
     PENDING = "pending"
     RUNNING = "running"
@@ -38,14 +45,16 @@ class ExportItem:
     """A single queued export job.
 
     Records the validated processed-video folder, the explicit output path,
-    the blur strength and the SAM3 mask source captured at enqueue time, plus
-    mutable status fields.
+    the blur strength, the SAM3 mask source and how names and profile pictures
+    are hidden, all captured at enqueue time, plus mutable status fields.
     """
 
     source_dir: Path
     output_path: Path
     blur_strength: int
     sam3_source: str = "auto"
+    text_method: str = TEXT_METHOD_DEFAULT
+    image_method: str = IMAGE_METHOD_DEFAULT
     delete_source_after: bool = False
     status: str = ItemStatus.PENDING
     exit_code: Optional[int] = None
@@ -125,6 +134,10 @@ def build_export_command(item: ExportItem, python_executable: str = None) -> lis
         str(item.blur_strength),
         "--masks",
         item.sam3_source,
+        "--text_method",
+        item.text_method,
+        "--image_method",
+        item.image_method,
     ]
 
 
@@ -160,7 +173,9 @@ class ExportQueueController:
     # -- queue mutation -------------------------------------------------
 
     def add(self, source_dir, output_path, blur_strength,
-            sam3_source="auto", delete_source_after=False) -> ExportItem:
+            sam3_source="auto", delete_source_after=False,
+            text_method=TEXT_METHOD_DEFAULT,
+            image_method=IMAGE_METHOD_DEFAULT) -> ExportItem:
         """Validate and enqueue a job, rejecting duplicates.
 
         Raises ``ExportQueueError`` with a user-facing message when the folder
@@ -176,6 +191,9 @@ class ExportQueueController:
             raise ExportQueueError(
                 f"Invalid SAM3 mask source: {sam3_source!r}."
             )
+        for method in (text_method, image_method):
+            if method not in OBFUSCATION_METHODS:
+                raise ExportQueueError(f"Invalid obfuscation method: {method!r}.")
 
         ok, reason = validate_processed_folder(source_dir)
         if not ok:
@@ -198,6 +216,8 @@ class ExportQueueController:
             output_path=output_path,
             blur_strength=int(blur_strength),
             sam3_source=sam3_source,
+            text_method=text_method,
+            image_method=image_method,
             delete_source_after=bool(delete_source_after),
             _id=self._next_id,
         )

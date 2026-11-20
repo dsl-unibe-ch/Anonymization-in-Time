@@ -16,7 +16,18 @@ from ait.export_queue import (
     ExportQueueError,
     validate_processed_folder,
     discover_pipeline_folders,
+    IMAGE_METHOD_DEFAULT,
+    TEXT_METHOD_DEFAULT,
 )
+
+# Export panel choices for hiding names / profile pictures: label -> method.
+HIDE_CHOICES = {
+    "Inpaint (melt into background)": "inpaint",
+    "Shade (soft shape)": "shade",
+    "Flat gray": "flat",
+    "Blur (old; reversible)": "blur",
+}
+_HIDE_LABELS = {v: k for k, v in HIDE_CHOICES.items()}
 from ait.config import get_last_browse_dir, set_last_browse_dir
 
 
@@ -143,11 +154,25 @@ class AiTLauncher:
             export_frame,
             text="Queue processed video folders and export them one after "
                  "another.\n" +
-                 "Each job records its blur strength when added. Exports run "
+                 "Each job records its settings when added. Exports run "
                  "one at a time.",
             justify=tk.LEFT,
             foreground="gray"
         ).pack(anchor=tk.W, pady=(0, 10))
+
+        # How names and profile pictures are hidden (captured per job)
+        hide_frame = ttk.Frame(export_frame)
+        hide_frame.pack(fill=tk.X, pady=(0, 6))
+        self.text_method_var = tk.StringVar(value=_HIDE_LABELS[TEXT_METHOD_DEFAULT])
+        self.image_method_var = tk.StringVar(value=_HIDE_LABELS[IMAGE_METHOD_DEFAULT])
+        for row, (label, var) in enumerate((("Hide names:", self.text_method_var),
+                                            ("Hide pictures:", self.image_method_var))):
+            ttk.Label(hide_frame, text=label).grid(
+                row=row, column=0, sticky=tk.W, padx=(0, 5), pady=1)
+            ttk.Combobox(
+                hide_frame, textvariable=var, values=list(HIDE_CHOICES),
+                state="readonly", width=30
+            ).grid(row=row, column=1, sticky=tk.W, pady=1)
 
         # Blur strength setting (captured per job when Add is pressed)
         blur_frame = ttk.Frame(export_frame)
@@ -168,7 +193,7 @@ class AiTLauncher:
 
         ttk.Label(
             blur_frame,
-            text="(odd number, 3-201)",
+            text="(odd number, 3-201; not used by Shade)",
             foreground="gray"
         ).pack(side=tk.LEFT)
 
@@ -180,18 +205,20 @@ class AiTLauncher:
 
         # Queue table showing each job's source, output, blur, masks, delete
         # flag, and status
-        columns = ("source", "output", "blur", "masks", "del", "status")
+        columns = ("source", "output", "hide", "blur", "masks", "del", "status")
         self.queue_tree = ttk.Treeview(
             export_frame, columns=columns, show="headings", height=6
         )
         self.queue_tree.heading("source", text="Source Folder")
         self.queue_tree.heading("output", text="Output File")
+        self.queue_tree.heading("hide", text="Names / Pictures")
         self.queue_tree.heading("blur", text="Blur")
         self.queue_tree.heading("masks", text="Masks")
         self.queue_tree.heading("del", text="Del")
         self.queue_tree.heading("status", text="Status")
-        self.queue_tree.column("source", width=150, anchor=tk.W)
-        self.queue_tree.column("output", width=150, anchor=tk.W)
+        self.queue_tree.column("source", width=125, anchor=tk.W)
+        self.queue_tree.column("output", width=125, anchor=tk.W)
+        self.queue_tree.column("hide", width=100, anchor=tk.CENTER)
         self.queue_tree.column("blur", width=40, anchor=tk.CENTER)
         self.queue_tree.column("masks", width=65, anchor=tk.CENTER)
         self.queue_tree.column("del", width=35, anchor=tk.CENTER)
@@ -637,6 +664,8 @@ class AiTLauncher:
         if blur_strength % 2 == 0:
             blur_strength += 1
             self.blur_strength_var.set(blur_strength)
+        text_method = HIDE_CHOICES.get(self.text_method_var.get(), TEXT_METHOD_DEFAULT)
+        image_method = HIDE_CHOICES.get(self.image_method_var.get(), IMAGE_METHOD_DEFAULT)
 
         if len(pipeline_folders) == 1:
             options = self._ask_export_options(pipeline_folders[0])
@@ -656,6 +685,8 @@ class AiTLauncher:
                     source, output_path, blur_strength,
                     sam3_source=sam3_source,
                     delete_source_after=delete_source,
+                    text_method=text_method,
+                    image_method=image_method,
                 )
                 added += 1
             except ExportQueueError as e:
@@ -775,6 +806,7 @@ class AiTLauncher:
                 values=(
                     str(item.source_dir),
                     str(item.output_path),
+                    f"{item.text_method} / {item.image_method}",
                     item.blur_strength,
                     masks_display,
                     "yes" if item.delete_source_after else "",

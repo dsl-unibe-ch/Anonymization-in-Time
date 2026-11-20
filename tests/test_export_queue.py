@@ -347,6 +347,34 @@ class CommandBuildTest(unittest.TestCase):
             cmd = build_export_command(item, "py")
         self.assertEqual(cmd[cmd.index("--masks") + 1], "circular")
 
+    def test_command_passes_hiding_methods(self):
+        controller = ExportQueueController(runner=FakeRunner([]), python_executable="py")
+        with tempfile.TemporaryDirectory() as base:
+            folder = make_processed_folder(base, "vid")
+            default = build_export_command(
+                controller.add(folder, Path(base) / "a.mp4", 33), "py")
+            folder2 = make_processed_folder(base, "vid2")
+            chosen = build_export_command(controller.add(
+                folder2, Path(base) / "b.mp4", 33,
+                text_method="shade", image_method="flat"), "py")
+        self.assertEqual(default[default.index("--text_method") + 1], "inpaint")
+        self.assertEqual(default[default.index("--image_method") + 1], "shade")
+        self.assertEqual(chosen[chosen.index("--text_method") + 1], "shade")
+        self.assertEqual(chosen[chosen.index("--image_method") + 1], "flat")
+
+    def test_add_rejects_invalid_method(self):
+        controller = ExportQueueController(runner=FakeRunner([]), python_executable="py")
+        with tempfile.TemporaryDirectory() as base:
+            folder = make_processed_folder(base, "vid")
+            with self.assertRaises(ExportQueueError):
+                controller.add(folder, Path(base) / "a.mp4", 33, image_method="swirl")
+
+    def test_methods_match_obfuscation_module(self):
+        from ait import export_queue, obfuscation
+        self.assertEqual(set(export_queue.OBFUSCATION_METHODS), set(obfuscation.METHODS))
+        self.assertEqual(export_queue.TEXT_METHOD_DEFAULT, obfuscation.TEXT_DEFAULT)
+        self.assertEqual(export_queue.IMAGE_METHOD_DEFAULT, obfuscation.IMAGE_DEFAULT)
+
 
 class DiscoverPipelineFoldersTest(unittest.TestCase):
     def setUp(self):
