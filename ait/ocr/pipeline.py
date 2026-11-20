@@ -28,6 +28,7 @@ from .name_matching import filter_by_names
 from .stabilization import stabilize
 from .scroll_extension import extend_scrolling_names
 from .format import to_unified
+from .steady import steady_ocr_boxes
 
 from ait.frame_files import list_frame_files
 from ait.utils import extract_video_frames
@@ -337,6 +338,11 @@ def process_video_ocr(video_path, output_dir, dict_path,
 
     # --- Step 6: convert to unified output format ---
     unified = to_unified(annotated_boxes)
+
+    # --- Step 7: steady each track's boxes over time (removes the 1-3 px
+    # wobble the viewer showed and the alterego copied); the detection is
+    # kept as detected_bbox and the export hides the union of both ---
+    unified = steady_ocr_boxes(unified)
 
     # --- Save ---
     with open(output_pkl, "wb") as f:

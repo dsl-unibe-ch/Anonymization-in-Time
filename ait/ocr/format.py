@@ -18,6 +18,9 @@ Output schema per box:
         "extrapolated": bool,              True if added by scroll_extension
                                             (no OCR detection; bbox may run
                                             past the frame edge)
+        "detected_bbox": (x1, y1, x2, y2), only if steady.steady_ocr_boxes
+                                            moved bbox: the detection; the
+                                            export hides bbox + detected_bbox
     }
 """
 

@@ -488,7 +488,11 @@ class CanvasWidget(tk.Canvas):
             if ann.get('source') == 'ocr':
                 original_patch = cv_img[y1:y2, x1:x2].copy()
                 ocr_text_overlays.append((ann, original_patch, x1, y1, x2, y2))
-                blur_mask[y1:y2, x1:x2] = True
+                # Same region as the export: steadied box + its detection
+                from ait.ocr.steady import hidden_box
+                hx1, hy1, hx2, hy2 = hidden_box(ann)
+                blur_mask[max(0, hy1):max(0, min(hy2, height)),
+                          max(0, hx1):max(0, min(hx2, width))] = True
             
             # For SAM3, use mask
             elif ann.get('source') == 'sam3':

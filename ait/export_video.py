@@ -16,7 +16,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from ait.utils import (rebuild_full_mask, shared_alterego_font_sizes,
                        track_alterego_font_sizes, load_alterego_font,
-                       fit_alterego_font_size, stabilized_text_boxes)
+                       fit_alterego_font_size)
+from ait.ocr.steady import hidden_box
 from ait.frame_files import VIDEO_INFO_NAME, list_frame_files, read_video_info
 from ait.obfuscation import (DEFAULT_METHOD, IMAGE_DEFAULT, METHODS, TEXT_DEFAULT,
                              infer_text_color, obfuscate_region, obfuscate_regions,
@@ -388,10 +389,9 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
                                            ann['bbox'][2] - ann['bbox'][0],
                                            ann['bbox'][3] - ann['bbox'][1], font_path),
     ) if ocr_blur else {}
-    # One alterego colour per track, and steadier boxes to draw it in: both
-    # flickered when taken from each frame's own (noisy, wobbling) box.
+    # One alterego colour per track: snapped per frame, video noise made it
+    # flicker between shades. (Box steadying happens in the OCR pipeline.)
     track_colors = track_text_colors(ocr_annotations, frame_files) if ocr_blur else {}
-    text_boxes = stabilized_text_boxes(ocr_annotations) if ocr_blur else {}
 
     # Setup video writer
     fourcc = cv2.VideoWriter_fourcc(*codec)
@@ -463,7 +463,12 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
                             if x2 > x1 and y2 > y1:
                                 original_patch = frame[y1:y2, x1:x2].copy()
                                 ocr_text_overlays.append((ann, original_patch, x1, y1, x2, y2))
-                                text_mask[y1:y2, x1:x2] = True
+                            # Hide the steadied box and the detection it came
+                            # from, so steadying never uncovers detected text
+                            hx1, hy1, hx2, hy2 = hidden_box(ann)
+                            hx1, hx2 = max(0, min(hx1, width)), max(0, min(hx2, width))
+                            hy1, hy2 = max(0, min(hy1, height)), max(0, min(hy2, height))
+                            text_mask[hy1:hy2, hx1:hx2] = True
             
             # Apply SAM3 mask blurring
             if sam3_blur and frame_idx in sam3_annotations:
@@ -506,7 +511,7 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
                 frame = add_custom_text_to_frame(
                     frame, ann, original_patch, x1, y1, x2, y2,
                     font_path, font_size=group_sizes.get(id(ann)),
-                    text_box=text_boxes.get(id(ann), tuple(ann['bbox'])),
+                    text_box=tuple(ann['bbox']),
                     text_color=track_colors.get(ann.get('track_id')),
                 )
         

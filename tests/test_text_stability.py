@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from ait.obfuscation import track_text_color
-from ait.utils import stabilized_text_boxes
+from ait.ocr.steady import stabilized_text_boxes, steady_ocr_boxes, hidden_box
 
 
 def _ann(track, box, show=True):
@@ -70,6 +70,36 @@ class StabilizedTextBoxesTest(unittest.TestCase):
     def test_hidden_and_untracked_boxes_skipped(self):
         ocr = {0: [_ann(None, (0, 0, 10, 10)), _ann(1, (0, 0, 10, 10), show=False)]}
         self.assertEqual(stabilized_text_boxes(ocr), {})
+
+
+class SteadyOcrBoxesTest(unittest.TestCase):
+    _scene = StabilizedTextBoxesTest._scene
+
+    def test_pipeline_step_keeps_detection_and_hides_both(self):
+        ocr = self._scene([0] * 20)
+        ocr[3].append(_ann(None, (5, 5, 30, 15)))          # untracked: untouched
+        out = steady_ocr_boxes(ocr)
+        moved = 0
+        for f in ocr:
+            for before, after in zip(ocr[f], out[f]):
+                self.assertIsNot(before, after)            # input not modified
+                if before["track_id"] is None:
+                    self.assertEqual(after, before)
+                    continue
+                det = after.get("detected_bbox", after["bbox"])
+                self.assertEqual(tuple(det), tuple(before["bbox"]))
+                moved += "detected_bbox" in after
+                hx1, hy1, hx2, hy2 = hidden_box(after)
+                for b in (after["bbox"], det):             # union covers both
+                    self.assertTrue(hx1 <= b[0] and hy1 <= b[1] and b[2] <= hx2 and b[3] <= hy2)
+        self.assertGreater(moved, 0)
+
+    def test_hidden_boxes_are_steadied_too(self):
+        ocr = self._scene([0] * 20)
+        for f in ocr:
+            for a in ocr[f]:
+                a["to_show"] = False
+        self.assertTrue(any("detected_bbox" in a for f in ocr for a in steady_ocr_boxes(ocr)[f]))
 
 
 class TrackTextColorTest(unittest.TestCase):
