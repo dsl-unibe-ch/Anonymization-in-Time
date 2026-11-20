@@ -8,10 +8,11 @@ each candidate, apply the same blur and pick the closest match. See
 ``tools/blur_attack.py`` for a measurement.
 
 The safe methods here throw the content away first: the masked region is
-refilled from the pixels around it (which the viewer sees anyway). The default
-'shade' then darkens it toward the centre in a shape computed from the mask
-alone, so it still reads as a blurred blob; 'inpaint' blurs the refill. Either
-way the output inside the mask carries no information about what was there.
+refilled from the pixels around it (which the viewer sees anyway). Names then
+get 'inpaint' (the refill, blurred: the name melts into its background and the
+alterego is drawn there); profile pictures get 'shade' (darkened toward the
+centre in a shape computed from the mask alone, so a soft disc stays visible).
+Either way the output inside the mask carries no information about what was there.
 Only the mask's shape and position remain.
 """
 
@@ -19,11 +20,17 @@ import cv2
 import numpy as np
 
 METHODS = ("shade", "inpaint", "flat", "blur")
-DEFAULT_METHOD = "shade"
+# Names disappear into their background (the alterego is drawn there);
+# profile pictures become a shaded disc so it stays visible that one was there.
+TEXT_DEFAULT = "inpaint"
+IMAGE_DEFAULT = "shade"
+DEFAULT_METHOD = TEXT_DEFAULT
 
-# 'shade': how much the centre of a region moves toward black (on a light
-# background) or white (on a dark one).
+# 'shade': how much a region moves toward black (on a light background) or
+# white (on a dark one): _SHADE_EDGE right at its edge, so the shape shows at
+# its real size, rising to _SHADE_AMOUNT at the centre.
 _SHADE_AMOUNT = 0.3
+_SHADE_EDGE = 0.12
 _DARK_BACKGROUND = 110
 
 # Pixels next to the mask (anti-aliased glyph edges, avatar rims) are not used
@@ -88,7 +95,10 @@ def _shade(filled, mask):
         p = cv2.GaussianBlur(np.pad(d / depth, pad), (0, 0), s)[pad:-pad, pad:-pad]
         p *= np.clip(d / max(2.0, 0.3 * depth), 0, 1)
         p /= max(float(p[comp].max()), 1e-6)
-        p = (p * p * (3 - 2 * p))[comp][:, None] * _SHADE_AMOUNT
+        p = p * p * (3 - 2 * p)
+        # Start at _SHADE_EDGE at the rim (over ~1.5 px, for anti-aliasing).
+        p = np.clip(d / 1.5, 0, 1) * (_SHADE_EDGE + (_SHADE_AMOUNT - _SHADE_EDGE) * p)
+        p = p[comp][:, None]
         region = out[y:y + h, x:x + w]
         px = region[comp]
         if float(px.mean()) >= _DARK_BACKGROUND:
@@ -141,9 +151,10 @@ def obfuscate_region(image, mask, strength=91, method=DEFAULT_METHOD):
         mask: Boolean (H, W) mask of the pixels to hide.
         strength: Gaussian kernel size (made odd) for the soft look (not used
             by 'shade', whose softness follows the size of each region).
-        method: 'shade' (default: refill from the surroundings, then shade
-            toward the centre in a shape that depends only on the mask),
-            'inpaint' (refill from the surroundings, then blur),
+        method: 'shade' (refill from the surroundings, then shade toward
+            the centre in a shape that depends only on the mask; the default
+            for profile pictures), 'inpaint' (refill from the surroundings,
+            then blur; the default for names),
             'flat' (fill with a neutral gray, then blur), or 'blur' (legacy
             Gaussian blur of the original pixels; can be matched against
             candidates, kept only for comparison).
@@ -152,29 +163,50 @@ def obfuscate_region(image, mask, strength=91, method=DEFAULT_METHOD):
         New image. For 'shade', 'inpaint' and 'flat' the pixels inside the
         mask do not depend on the original pixels inside the mask.
     """
-    if method not in METHODS:
-        raise ValueError(f"Unknown obfuscation method {method!r}; use one of {METHODS}")
-    mask = np.asarray(mask, dtype=bool)
+    return obfuscate_regions(image, [(mask, method)], strength)
+
+
+def obfuscate_regions(image, regions, strength=91):
+    """
+    Hide several masked regions, each with its own method (e.g. names with
+    'inpaint' and profile pictures with 'shade').
+
+    All regions that use a safe method are refilled together, from pixels
+    outside every one of them, before any is styled: otherwise a name box's
+    blur (which reaches strength//2 px) or fill could pull in a nearby,
+    still-unhidden profile picture, and the other way round.
+
+    Args:
+        image: BGR uint8 image (not modified).
+        regions: list of (mask, method) pairs; methods as in obfuscate_region.
+        strength: Gaussian kernel size for the blurred methods.
+    """
+    for _, method in regions:
+        if method not in METHODS:
+            raise ValueError(f"Unknown obfuscation method {method!r}; use one of {METHODS}")
+    regions = [(np.asarray(m, dtype=bool), method) for m, method in regions]
+    regions = [(m, method) for m, method in regions if m.any()]
     result = image.copy()
-    if not mask.any():
+    if not regions:
         return result
     k = _odd(strength)
 
-    if method == "shade":
-        filled = _fill_from_surroundings(image, mask)
-        result[mask] = _shade(filled, mask)[mask]
-        return result
-    if method == "blur":
-        source = image
-    elif method == "flat":
-        source = image.copy()
-        source[mask] = _FLAT_GRAY
-    else:
-        source = _fill_from_surroundings(image, mask)
+    safe = [m for m, method in regions if method != "blur"]
+    source = image
+    if safe:
+        source = _fill_from_surroundings(image, np.logical_or.reduce(safe))
+        for m, method in regions:
+            if method == "flat":
+                source[m] = _FLAT_GRAY
 
-    # Blur only a window around the mask (the kernel reaches k//2 px).
-    y0, y1, x0, x1 = _bounds(mask, k // 2 + 1, image.shape)
-    window = cv2.GaussianBlur(np.ascontiguousarray(source[y0:y1, x0:x1]), (k, k), 0)
-    local = mask[y0:y1, x0:x1]
-    result[y0:y1, x0:x1][local] = window[local]
+    for mask, method in regions:
+        if method == "shade":
+            result[mask] = _shade(source, mask)[mask]
+            continue
+        src = image if method == "blur" else source
+        # Blur only a window around the mask (the kernel reaches k//2 px).
+        y0, y1, x0, x1 = _bounds(mask, k // 2 + 1, image.shape)
+        window = cv2.GaussianBlur(np.ascontiguousarray(src[y0:y1, x0:x1]), (k, k), 0)
+        local = mask[y0:y1, x0:x1]
+        result[y0:y1, x0:x1][local] = window[local]
     return result

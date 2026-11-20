@@ -5,7 +5,7 @@ import unittest
 import cv2
 import numpy as np
 
-from ait.obfuscation import infer_text_color, obfuscate_region
+from ait.obfuscation import infer_text_color, obfuscate_region, obfuscate_regions
 
 
 def _scene(seed):
@@ -70,9 +70,26 @@ class ObfuscationTest(unittest.TestCase):
             img = np.full((60, 60, 3), bg, np.uint8)
             img[m] = 255 - bg                      # hidden text
             out = obfuscate_region(img, m, 91, "shade")
-            centre, edge = int(out[30, 30, 0]), int(out[20, 10, 0])
-            self.assertLessEqual(abs(edge - bg), 3)   # blends into the edge
-            self.assertTrue(centre < bg - 20 if darker else centre > bg + 20)
+            centre, edge = int(out[30, 30, 0]), int(out[20, 25, 0])
+            # Visibly shaded right at the edge, more so in the centre.
+            if darker:
+                self.assertTrue(centre < edge < bg - 5)
+            else:
+                self.assertTrue(centre > edge > bg + 5)
+
+    def test_mixed_regions_do_not_leak_into_each_other(self):
+        a, b, m = self._two_secrets()
+        text = m.copy()
+        text[:, 160:] = False                  # the name box
+        image = m & ~text                      # the avatar disc, 10 px away
+        regions = [(text, "inpaint"), (image, "shade")]
+        np.testing.assert_array_equal(obfuscate_regions(a, regions, 91),
+                                      obfuscate_regions(b, regions, 91))
+        # Only the avatar differs: the name box must still come out the same.
+        c = a.copy()
+        c[image] = 255 - c[image]
+        np.testing.assert_array_equal(obfuscate_regions(a, regions, 91)[text],
+                                      obfuscate_regions(c, regions, 91)[text])
 
     def test_full_frame_mask_does_not_crash(self):
         img = _scene(5)

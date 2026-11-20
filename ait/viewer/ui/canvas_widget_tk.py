@@ -460,7 +460,8 @@ class CanvasWidget(tk.Canvas):
         height, width = cv_img.shape[:2]
         
         # Create blur mask
-        blur_mask = np.zeros((height, width), dtype=bool)
+        blur_mask = np.zeros((height, width), dtype=bool)   # names
+        image_mask = np.zeros((height, width), dtype=bool)  # pictures
         
         # Store OCR boxes with text replacements
         ocr_text_overlays = []
@@ -496,15 +497,17 @@ class CanvasWidget(tk.Canvas):
                     try:
                         from ait.viewer.utils.mask_utils import rebuild_full_mask
                         full_mask = rebuild_full_mask(mask_data, (height, width))
-                        blur_mask |= full_mask
+                        image_mask |= full_mask
                     except:
-                        blur_mask[y1:y2, x1:x2] = True
+                        image_mask[y1:y2, x1:x2] = True
         
         # Apply blur
-        if blur_mask.any():
-            from ait.obfuscation import obfuscate_region
-            # Same method as the export default, at the default strength.
-            cv_img = obfuscate_region(cv_img, blur_mask, 91)
+        if blur_mask.any() or image_mask.any():
+            from ait.obfuscation import IMAGE_DEFAULT, TEXT_DEFAULT, obfuscate_regions
+            # Same methods as the export defaults, at the default strength.
+            cv_img = obfuscate_regions(
+                cv_img, [(blur_mask & ~image_mask, TEXT_DEFAULT),
+                         (image_mask, IMAGE_DEFAULT)], 91)
         
         # Uniform font size per matched name — so adjacent words of one
         # alterego render at the same visual size.

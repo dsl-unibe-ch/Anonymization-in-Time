@@ -18,8 +18,8 @@ from ait.utils import (rebuild_full_mask, shared_alterego_font_sizes,
                        track_alterego_font_sizes, load_alterego_font,
                        fit_alterego_font_size)
 from ait.frame_files import VIDEO_INFO_NAME, list_frame_files, read_video_info
-from ait.obfuscation import (DEFAULT_METHOD, METHODS, infer_text_color,
-                             obfuscate_region)
+from ait.obfuscation import (DEFAULT_METHOD, IMAGE_DEFAULT, METHODS, TEXT_DEFAULT,
+                             infer_text_color, obfuscate_region, obfuscate_regions)
 
 
 def apply_blur_to_region(image, mask, blur_strength=91, method=DEFAULT_METHOD):
@@ -213,7 +213,8 @@ def resolve_sam3_file(video_dir, sam3_source="auto"):
 def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
                            ocr_blur=True, sam3_blur=True, transition_blur=True,
                            fps=None, codec='mp4v', font_path=None,
-                           sam3_source='auto', method=DEFAULT_METHOD):
+                           sam3_source='auto', method=None,
+                           text_method=TEXT_DEFAULT, image_method=IMAGE_DEFAULT):
     """
     Export an anonymized video with blurring applied to reviewed annotations.
 
@@ -231,10 +232,15 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
             'original' (sam3.pkl), 'circular' (sam3_circular.pkl), or 'auto'
             (follow the choice made in the annotation viewer, if recorded).
             Ignored when state.pkl exists — its masks are already the reviewed ones.
-        method (str): How names and profile pictures are hidden: 'inpaint'
-            (default), 'flat', or 'blur' (legacy; can be undone by matching
-            candidates, see tools/blur_attack.py).
+        text_method (str): How names (OCR boxes) are hidden: 'inpaint'
+            (default), 'shade', 'flat', or 'blur' (legacy; can be undone by
+            matching candidates, see tools/blur_attack.py).
+        image_method (str): How profile pictures (SAM3 masks) are hidden;
+            same choices, default 'shade'.
+        method (str): If given, overrides both text_method and image_method.
     """
+    if method:
+        text_method = image_method = method
     video_dir = Path(video_dir)
     frames_dir = video_dir / "frames"
     state_file = video_dir / "state.pkl"
@@ -357,7 +363,8 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
     transition_blur_strength = blur_strength * 3
     if transition_blur_strength % 2 == 0:
         transition_blur_strength += 1
-    print(f"Obfuscation: {method}, blur strength: {blur_strength}")
+    print(f"Obfuscation: names {text_method}, pictures {image_method}, "
+          f"blur strength: {blur_strength}")
     print(f"Transition blur strength: {transition_blur_strength}")
     print(f"OCR blur: {ocr_blur}, SAM3 blur: {sam3_blur}, Transition blur: {transition_blur}\n")
     
@@ -376,8 +383,10 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
             print(f"Warning: Could not read frame {frame_file}")
             continue
         
-        # Create combined blur mask
+        # Masks: whole frame (transitions), names (OCR), pictures (SAM3)
         blur_mask = np.zeros((height, width), dtype=bool)
+        text_mask = np.zeros((height, width), dtype=bool)
+        image_mask = np.zeros((height, width), dtype=bool)
         
         # Check if this frame is in a transition
         in_transition = False
@@ -412,7 +421,7 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
                             if x2 > x1 and y2 > y1:
                                 original_patch = frame[y1:y2, x1:x2].copy()
                                 ocr_text_overlays.append((ann, original_patch, x1, y1, x2, y2))
-                                blur_mask[y1:y2, x1:x2] = True
+                                text_mask[y1:y2, x1:x2] = True
             
             # Apply SAM3 mask blurring
             if sam3_blur and frame_idx in sam3_annotations:
@@ -424,17 +433,20 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
                         if mask_data is not None:
                             try:
                                 full_mask = rebuild_full_mask(mask_data, (height, width))
-                                blur_mask |= full_mask
+                                image_mask |= full_mask
                             except Exception as e:
                                 print(f"Warning: Error processing mask on frame {frame_idx}: {e}")
         
         # Apply blurring if there's anything to blur
-        if blur_mask.any():
-            strength = transition_blur_strength if in_transition else blur_strength
+        if in_transition:
             # Transitions keep the full-frame Gaussian blur (nothing around
             # a full-frame mask to refill from).
-            frame = apply_blur_to_region(frame, blur_mask, strength,
-                                         "blur" if in_transition else method)
+            frame = obfuscate_region(frame, blur_mask, transition_blur_strength, "blur")
+        else:
+            # Names under pictures' masks are hidden as pictures.
+            frame = obfuscate_regions(
+                frame, [(text_mask & ~image_mask, text_method),
+                        (image_mask, image_method)], blur_strength)
         
         # Uniform font size per matched name — so adjacent words of one
         # alterego render at the same visual size.
@@ -493,11 +505,16 @@ def main():
                        help='Which SAM3 masks to use when no state.pkl exists: '
                             'original (sam3.pkl), circular (sam3_circular.pkl), '
                             'or auto (follow the annotation viewer choice, default)')
-    parser.add_argument('--method', type=str, default=DEFAULT_METHOD, choices=list(METHODS),
-                       help='How names and profile pictures are hidden: inpaint '
-                            '(refill from the surroundings, then blur; default), flat '
-                            '(gray, then blur), or blur (legacy Gaussian blur of the '
-                            'original pixels, which can be matched against candidates)')
+    parser.add_argument('--text_method', type=str, default=TEXT_DEFAULT, choices=list(METHODS),
+                       help='How names are hidden: inpaint (refill from the '
+                            'surroundings, then blur; default), shade (refill, then '
+                            'a shaded shape), flat (gray, then blur), or blur (legacy '
+                            'Gaussian blur of the original pixels, which can be '
+                            'matched against candidates)')
+    parser.add_argument('--image_method', type=str, default=IMAGE_DEFAULT, choices=list(METHODS),
+                       help='How profile pictures are hidden; same choices, default shade')
+    parser.add_argument('--method', type=str, default=None, choices=list(METHODS),
+                       help='Use this method for both names and profile pictures')
     
     args = parser.parse_args()
     
@@ -518,6 +535,8 @@ def main():
             codec=args.codec,
             sam3_source=args.masks,
             method=args.method,
+            text_method=args.text_method,
+            image_method=args.image_method,
         )
     except Exception as e:
         print(f"\nError: {str(e)}")
