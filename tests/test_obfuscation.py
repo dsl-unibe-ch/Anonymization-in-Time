@@ -35,7 +35,7 @@ class ObfuscationTest(unittest.TestCase):
 
     def test_safe_methods_do_not_depend_on_hidden_pixels(self):
         a, b, m = self._two_secrets()
-        for method in ("shade", "inpaint", "flat"):
+        for method in ("shade", "inpaint"):
             with self.subTest(method=method):
                 np.testing.assert_array_equal(
                     obfuscate_region(a, m, 31, method), obfuscate_region(b, m, 31, method))
@@ -47,7 +47,7 @@ class ObfuscationTest(unittest.TestCase):
 
     def test_pixels_outside_mask_unchanged(self):
         img, m = _scene(2), _mask()
-        for method in ("shade", "inpaint", "flat", "blur"):
+        for method in ("shade", "inpaint", "blur"):
             out = obfuscate_region(img, m, 51, method)
             np.testing.assert_array_equal(out[~m], img[~m])
 

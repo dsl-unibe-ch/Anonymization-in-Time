@@ -19,7 +19,7 @@ Only the mask's shape and position remain.
 import cv2
 import numpy as np
 
-METHODS = ("shade", "inpaint", "flat", "blur")
+METHODS = ("shade", "inpaint", "blur")
 # Names disappear into their background (the alterego is drawn there);
 # profile pictures become a shaded disc so it stays visible that one was there.
 TEXT_DEFAULT = "inpaint"
@@ -37,7 +37,7 @@ _DARK_BACKGROUND = 110
 # as fill sources, so they do not smear streaks into the region.
 _FILL_MARGIN = 2
 _INPAINT_RADIUS = 5
-_FLAT_GRAY = (160, 160, 160)
+_NEUTRAL_GRAY = (160, 160, 160)
 
 
 def _odd(k):
@@ -59,7 +59,7 @@ def _fill_from_surroundings(image, mask):
     if grown.all():
         # Nothing outside to fill from (full frame): a neutral constant.
         out = image.copy()
-        out[:] = _FLAT_GRAY
+        out[:] = _NEUTRAL_GRAY
         return out
     out = image.copy()
     # Zero the hidden pixels first so the fill cannot depend on them, whatever
@@ -183,13 +183,11 @@ def obfuscate_region(image, mask, strength=91, method=DEFAULT_METHOD):
         method: 'shade' (refill from the surroundings, then shade toward
             the centre in a shape that depends only on the mask; the default
             for profile pictures), 'inpaint' (refill from the surroundings,
-            then blur; the default for names),
-            'flat' (fill with a neutral gray, then blur), or 'blur' (legacy
-            Gaussian blur of the original pixels; can be matched against
-            candidates, kept only for comparison).
+            then blur; the default for names), or 'blur' (legacy Gaussian
+            blur of the original pixels; can be matched against candidates).
 
     Returns:
-        New image. For 'shade', 'inpaint' and 'flat' the pixels inside the
+        New image. For 'shade' and 'inpaint' the pixels inside the
         mask do not depend on the original pixels inside the mask.
     """
     return obfuscate_regions(image, [(mask, method)], strength)
@@ -224,9 +222,6 @@ def obfuscate_regions(image, regions, strength=91):
     source = image
     if safe:
         source = _fill_from_surroundings(image, np.logical_or.reduce(safe))
-        for m, method in regions:
-            if method == "flat":
-                source[m] = _FLAT_GRAY
 
     for mask, method in regions:
         if method == "shade":

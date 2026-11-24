@@ -19,7 +19,7 @@ Avatars: synthetic portraits (background, face, hair, clothes, texture) in a
 circular mask, matched against the full set of candidate pictures.
 
 Usage:
-    python tools/blur_attack.py [--trials 20] [--seed 0] [--methods inpaint,flat]
+    python tools/blur_attack.py [--trials 20] [--seed 0] [--methods inpaint,shade]
 """
 
 import argparse
@@ -210,7 +210,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--trials", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--methods", default="blur,pixelate,fullframe,flat,inpaint,shade",
+    ap.add_argument("--methods", default="blur,pixelate,fullframe,inpaint,shade",
                     help="comma-separated subset to run")
     ap.add_argument("--no-avatars", action="store_true")
     args = ap.parse_args()
@@ -218,11 +218,11 @@ def main():
     wanted = set(args.methods.split(","))
     configs = [(m, k) for m, k in
                [("blur", 31), ("blur", 51), ("blur", 91), ("blur", 151),
-                ("pixelate", 0), ("fullframe", 91), ("flat", 91), ("inpaint", 91),
+                ("pixelate", 0), ("fullframe", 91), ("inpaint", 91),
                 ("shade", 91)]
                if m in wanted]
     label = {"blur": "gaussian blur k={k}", "pixelate": "pixelate",
-             "fullframe": "full-frame blur k={k3}", "flat": "flat gray + blur k={k}",
+             "fullframe": "full-frame blur k={k3}",
              "inpaint": "inpaint + blur k={k}", "shade": "shade"}
 
     print(f"NAMES: {POOL} candidates; top-1 / top-5 vs box-only baseline")

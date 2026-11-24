@@ -272,7 +272,7 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
             (follow the choice made in the annotation viewer, if recorded).
             Ignored when state.pkl exists — its masks are already the reviewed ones.
         text_method (str): How names (OCR boxes) are hidden: 'inpaint'
-            (default), 'shade', 'flat', or 'blur' (legacy; can be undone by
+            (default), 'shade', or 'blur' (legacy Gaussian; can be undone by
             matching candidates, see tools/blur_attack.py).
         image_method (str): How profile pictures (SAM3 masks) are hidden;
             same choices, default 'shade'.
@@ -442,58 +442,58 @@ def export_anonymized_video(video_dir, output_video_path, blur_strength=91,
         # Store OCR boxes with text replacements for later
         ocr_text_overlays = []
         
-        # If not in transition, apply OCR and SAM3 blurring
-        if not in_transition:
-            # Apply OCR box blurring
-            if ocr_blur and frame_idx in ocr_annotations:
-                # ocr_annotations[frame_idx] is a list of annotation dicts
-                for ann in ocr_annotations[frame_idx]:
-                    # Only blur if to_show is True (visible in annotation viewer)
-                    if ann.get('to_show', True):
-                        bbox = ann.get('bbox')
-                        if bbox:
-                            x1, y1, x2, y2 = bbox
-                            # Clamp to image bounds
-                            x1 = max(0, min(x1, width))
-                            x2 = max(0, min(x2, width))
-                            y1 = max(0, min(y1, height))
-                            y2 = max(0, min(y2, height))
-                            
-                            # Save original patch before blurring for color inference
-                            if x2 > x1 and y2 > y1:
-                                original_patch = frame[y1:y2, x1:x2].copy()
-                                ocr_text_overlays.append((ann, original_patch, x1, y1, x2, y2))
-                            # Hide the steadied box and the detection it came
-                            # from, so steadying never uncovers detected text
-                            hx1, hy1, hx2, hy2 = hidden_box(ann)
-                            hx1, hx2 = max(0, min(hx1, width)), max(0, min(hx2, width))
-                            hy1, hy2 = max(0, min(hy1, height)), max(0, min(hy2, height))
-                            text_mask[hy1:hy2, hx1:hx2] = True
-            
-            # Apply SAM3 mask blurring
-            if sam3_blur and frame_idx in sam3_annotations:
-                # sam3_annotations[frame_idx] is a list of annotation dicts
-                for ann in sam3_annotations[frame_idx]:
-                    # Only blur if to_show is True (visible in annotation viewer)
-                    if ann.get('to_show', True):
-                        mask_data = ann.get('mask')
-                        if mask_data is not None:
-                            try:
-                                full_mask = rebuild_full_mask(mask_data, (height, width))
-                                image_mask |= full_mask
-                            except Exception as e:
-                                print(f"Warning: Error processing mask on frame {frame_idx}: {e}")
+        # Names and pictures are collected in transitions too (see below).
+        # Apply OCR box blurring
+        if ocr_blur and frame_idx in ocr_annotations:
+            # ocr_annotations[frame_idx] is a list of annotation dicts
+            for ann in ocr_annotations[frame_idx]:
+                # Only blur if to_show is True (visible in annotation viewer)
+                if ann.get('to_show', True):
+                    bbox = ann.get('bbox')
+                    if bbox:
+                        x1, y1, x2, y2 = bbox
+                        # Clamp to image bounds
+                        x1 = max(0, min(x1, width))
+                        x2 = max(0, min(x2, width))
+                        y1 = max(0, min(y1, height))
+                        y2 = max(0, min(y2, height))
+                        
+                        # Save original patch before blurring for color inference
+                        if x2 > x1 and y2 > y1:
+                            original_patch = frame[y1:y2, x1:x2].copy()
+                            ocr_text_overlays.append((ann, original_patch, x1, y1, x2, y2))
+                        # Hide the steadied box and the detection it came
+                        # from, so steadying never uncovers detected text
+                        hx1, hy1, hx2, hy2 = hidden_box(ann)
+                        hx1, hx2 = max(0, min(hx1, width)), max(0, min(hx2, width))
+                        hy1, hy2 = max(0, min(hy1, height)), max(0, min(hy2, height))
+                        text_mask[hy1:hy2, hx1:hx2] = True
+        
+        # Apply SAM3 mask blurring
+        if sam3_blur and frame_idx in sam3_annotations:
+            # sam3_annotations[frame_idx] is a list of annotation dicts
+            for ann in sam3_annotations[frame_idx]:
+                # Only blur if to_show is True (visible in annotation viewer)
+                if ann.get('to_show', True):
+                    mask_data = ann.get('mask')
+                    if mask_data is not None:
+                        try:
+                            full_mask = rebuild_full_mask(mask_data, (height, width))
+                            image_mask |= full_mask
+                        except Exception as e:
+                            print(f"Warning: Error processing mask on frame {frame_idx}: {e}")
         
         # Apply blurring if there's anything to blur
+        # Names under pictures' masks are hidden as pictures.
+        frame = obfuscate_regions(
+            frame, [(text_mask & ~image_mask, text_method),
+                    (image_mask, image_method)], blur_strength)
         if in_transition:
-            # Transitions keep the full-frame Gaussian blur (nothing around
-            # a full-frame mask to refill from).
+            # Then the full-frame Gaussian blur, kept for its look: on its own
+            # it could be undone, but names and pictures are already gone.
+            # No alterego is drawn during a transition.
             frame = obfuscate_region(frame, blur_mask, transition_blur_strength, "blur")
-        else:
-            # Names under pictures' masks are hidden as pictures.
-            frame = obfuscate_regions(
-                frame, [(text_mask & ~image_mask, text_method),
-                        (image_mask, image_method)], blur_strength)
+            ocr_text_overlays = []
         
         # Uniform font size per matched name — so adjacent words of one
         # alterego render at the same visual size.
@@ -556,7 +556,7 @@ def main():
     parser.add_argument('--text_method', type=str, default=TEXT_DEFAULT, choices=list(METHODS),
                        help='How names are hidden: inpaint (refill from the '
                             'surroundings, then blur; default), shade (refill, then '
-                            'a shaded shape), flat (gray, then blur), or blur (legacy '
+                            'a shaded shape), or blur (legacy '
                             'Gaussian blur of the original pixels, which can be '
                             'matched against candidates)')
     parser.add_argument('--image_method', type=str, default=IMAGE_DEFAULT, choices=list(METHODS),

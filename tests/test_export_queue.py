@@ -356,11 +356,11 @@ class CommandBuildTest(unittest.TestCase):
             folder2 = make_processed_folder(base, "vid2")
             chosen = build_export_command(controller.add(
                 folder2, Path(base) / "b.mp4", 33,
-                text_method="shade", image_method="flat"), "py")
+                text_method="shade", image_method="blur"), "py")
         self.assertEqual(default[default.index("--text_method") + 1], "inpaint")
         self.assertEqual(default[default.index("--image_method") + 1], "shade")
         self.assertEqual(chosen[chosen.index("--text_method") + 1], "shade")
-        self.assertEqual(chosen[chosen.index("--image_method") + 1], "flat")
+        self.assertEqual(chosen[chosen.index("--image_method") + 1], "blur")
 
     def test_add_rejects_invalid_method(self):
         controller = ExportQueueController(runner=FakeRunner([]), python_executable="py")

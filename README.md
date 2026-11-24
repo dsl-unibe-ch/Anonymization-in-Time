@@ -6,7 +6,7 @@ Video anonymization tool for chat recordings. Detects names (OCR) and profile pi
 
 - **Processing pipeline**: Frame extraction, OCR text detection, SAM3 segmentation, scene transition detection. Folder input is searched **recursively** and the output **mirrors the source folder tree** (same-named videos in different subfolders stay separate)
 - **Annotation viewer**: Navigate frames, toggle annotation visibility, preview hidden annotations on hover
-- **Video export**: Apply Gaussian blur to visible annotations for anonymization, with a **sequential export queue** for batching multiple videos
+- **Video export**: Hide visible names and profile pictures so they cannot be recovered (see [How names and pictures are hidden](#how-names-and-pictures-are-hidden)), with a **sequential export queue** for batching multiple videos
 - **Cross-platform**: Works on Windows, Mac, and Linux
 
 ## Project Structure
@@ -114,7 +114,7 @@ The `ait` command opens the AiT launcher — the central hub for the three tools
 
 - **Video Processor** — runs the detection pipeline on your video files. Click **Launch Video Processor** to open it.
 - **Annotation Viewer** — lets you review and refine detections before exporting. Select a processed video folder first, then click **Launch Annotation Viewer**.
-- **Export Queue** — exports one or more reviewed videos with blur applied, running them **sequentially** (one at a time). Set the **Blur Strength** (Gaussian kernel size, odd number between 3 and 201 — higher means stronger blur, default 91), then **Add to Queue…** — point it at a single processed folder or a parent holding many (e.g. a mirrored output tree) to enqueue them all at once. See [Export Queue](#export-queue) below for the full workflow.
+- **Export Queue** — exports one or more reviewed videos, running them **sequentially** (one at a time). Choose how to **Hide names** and **Hide pictures**, set the **Blur Strength** (Gaussian kernel size, odd number between 3 and 201 — higher means stronger blur, default 91), then **Add to Queue…** — point it at a single processed folder or a parent holding many (e.g. a mirrored output tree) to enqueue them all at once. See [Export Queue](#export-queue) below for the full workflow.
 
 ---
 
@@ -194,7 +194,7 @@ Shows the current frame position, frame index, and annotation statistics (OCR co
 
 ### Transition Controls (4)
 
-Transitions mark frame ranges where the video content changes (e.g. a window switch, a new chat being opened). During export, transition frames are fully blurred to prevent leaking content from the old/new view.
+Transitions mark frame ranges where the video content changes (e.g. a window switch, a new chat being opened). During export, names and pictures in transition frames are hidden first, then the whole frame is blurred to prevent leaking content from the old/new view. No alterego is drawn during a transition.
 
 | Button | Shortcut | Description |
 |--------|----------|-------------|
@@ -217,7 +217,7 @@ Use the **Transitions** menu to list (4.1) all transitions or save them.
 |--------|----------|-------------|
 | **Save State** | `S` / `Ctrl+S` | Save visibility toggles and transition ranges so you can resume later |
 | **Export Visibility** | — | Export the visibility state as a standalone pickle file |
-| **Export Anonymized Video** | — | Available from the **File** menu (6.1). Exports the video with Gaussian blur applied to all visible annotations and full blur on transition frames |
+| **Export Anonymized Video** | — | Available from the **File** menu (6.1). Exports the video with all visible annotations hidden (default methods) and full blur on transition frames |
 
 ---
 
@@ -225,9 +225,21 @@ Use the **Transitions** menu to list (4.1) all transitions or save them.
 
 The launcher's **Export Queue** lets you export several processed videos in one session. Jobs run **sequentially — at most one export process runs at a time** — and the UI stays responsive throughout (the queue is polled on the Tkinter event loop rather than blocking).
 
+### How names and pictures are hidden
+
+The export panel has two dropdowns, **Hide names** and **Hide pictures** (command line: `--text_method`, `--image_method`, or `--method` for both):
+
+| Option | Command line | What it does |
+|---|---|---|
+| **Inpaint** | `inpaint` | Refills the region from the pixels around it, then blurs it: the name melts into its background and the alterego is drawn there. Default for names. |
+| **Shade** | `shade` | Refills the region from its surroundings, then shades it toward the centre, so a soft disc shows that a picture was there. Default for pictures. |
+| **Gaussian (legacy)** | `blur` | The Gaussian blur used up to v1.3.0. **It can be undone**: someone with a list of candidate names or profile pictures can blur each one the same way and pick the closest match (`tools/blur_attack.py` measures this). Use it only to reproduce old exports. |
+
+Inpaint and Shade never use the pixels they hide, so the result does not depend on the original name or picture; only the region's shape and position remain.
+
 ### Adding jobs
 
-1. Set the **Blur Strength** (odd number, 3–201). The value is **captured per job at the moment you add it**, so you can queue different strengths for different videos.
+1. Choose **Hide names** and **Hide pictures**, and set the **Blur Strength** (odd number, 3–201). These values are **captured per job at the moment you add it**, so you can queue different settings for different videos.
 2. Click **Add to Queue…** and pick a folder. This can be a **single processed video folder** or a **parent holding several** (e.g. a whole mirrored output tree) — every pipeline folder found underneath is offered for enqueue.
 3. A folder counts as a pipeline folder if it contains a `frames/` subdirectory **and** at least one of `state.pkl`, `ocr.pkl`, `sam3.pkl`, or `sam3_circular.pkl`.
 
@@ -237,7 +249,7 @@ The launcher's **Export Queue** lets you export several processed videos in one 
 
 **Delete after export**: the add dialog has an optional **Delete pipeline folder after successful export** checkbox. When enabled, the processed folder (frames + pickles) is removed once its export finishes successfully — handy for reclaiming disk after producing the final video. It is **never** deleted on failure or cancellation.
 
-Each queued job shows its **source folder**, **output file**, **blur**, **masks** (`reviewed`/`original`/`circular`), **del** (whether it will be deleted), and **status**.
+Each queued job shows its **source folder**, **output file**, **names / pictures** methods, **blur**, **masks** (`reviewed`/`original`/`circular`), **del** (whether it will be deleted), and **status**.
 
 **Duplicates are rejected** with a message: you cannot queue the same source folder twice, and you cannot point two jobs at the same output file. This keeps every export destination explicit and non-conflicting. (Overwriting a pre-existing file on disk still goes through the normal save-dialog confirmation.)
 

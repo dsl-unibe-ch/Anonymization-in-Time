@@ -1,7 +1,7 @@
 """
 Render one frame of a processed video with every obfuscation technique side
-by side (original, current Gaussian blur, pixelation, flat gray + blur,
-inpaint + blur, full-frame transition blur).
+by side (original, current Gaussian blur, pixelation,
+inpaint + blur, shade, full-frame transition blur).
 
 Usage:
     python tools/compare_obfuscation.py --video_dir <processed dir> --frame 10 \
@@ -92,7 +92,6 @@ def main():
     panels = [("original", "Original"),
               ("blur", f"Current: Gaussian k={k}"),
               ("pixelate", "Pixelate 8 px"),
-              ("flat", f"Flat gray + blur k={k}"),
               ("inpaint", f"Inpaint + blur k={k}"),
               ("shade", "Shade (new default)"),
               ("fullframe", f"Transition: full frame k={3 * k}")]

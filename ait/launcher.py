@@ -22,10 +22,9 @@ from ait.export_queue import (
 
 # Export panel choices for hiding names / profile pictures: label -> method.
 HIDE_CHOICES = {
-    "Inpaint (melt into background)": "inpaint",
-    "Shade (soft shape)": "shade",
-    "Flat gray": "flat",
-    "Blur (old; reversible)": "blur",
+    "Inpaint": "inpaint",
+    "Shade": "shade",
+    "Gaussian (legacy)": "blur",
 }
 _HIDE_LABELS = {v: k for k, v in HIDE_CHOICES.items()}
 from ait.config import get_last_browse_dir, set_last_browse_dir
@@ -806,7 +805,8 @@ class AiTLauncher:
                 values=(
                     str(item.source_dir),
                     str(item.output_path),
-                    f"{item.text_method} / {item.image_method}",
+                    f"{_HIDE_LABELS.get(item.text_method, item.text_method)} / "
+                    f"{_HIDE_LABELS.get(item.image_method, item.image_method)}",
                     item.blur_strength,
                     masks_display,
                     "yes" if item.delete_source_after else "",

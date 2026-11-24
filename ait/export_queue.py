@@ -20,7 +20,7 @@ from typing import Optional
 
 # Mirrors ait.obfuscation.METHODS / TEXT_DEFAULT / IMAGE_DEFAULT (kept here so
 # this module stays free of OpenCV imports; a test checks they match).
-OBFUSCATION_METHODS = ("shade", "inpaint", "flat", "blur")
+OBFUSCATION_METHODS = ("shade", "inpaint", "blur")
 TEXT_METHOD_DEFAULT = "inpaint"
 IMAGE_METHOD_DEFAULT = "shade"
 

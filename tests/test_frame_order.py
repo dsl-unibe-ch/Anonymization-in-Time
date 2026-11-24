@@ -210,6 +210,38 @@ class ExportTest(unittest.TestCase):
         cap.release()
         self.assertEqual(blurred, [False, False, False, True, False])
 
+    def test_transition_frames_do_not_leak_hidden_pixels(self):
+        # Frame 10001 is in a transition and has a profile picture. The
+        # full-frame blur alone would carry the picture; hiding it first must
+        # make the output independent of what was under the mask.
+        h = w = 32
+        mask = np.zeros((h, w), dtype=bool)
+        mask[8:24, 8:24] = True
+        sam3 = {10001: [{"bbox": (8, 8, 24, 24), "mask": mask, "source": "sam3",
+                          "to_show": True, "score": 0.9, "track_id": 0}]}
+        with open(self.video_dir / "sam3.pkl", "wb") as f:
+            pickle.dump(sam3, f)
+        (self.video_dir / "transitions.txt").write_text("10001,10001\n")
+        for p in self.frames.glob("*.jpg"):
+            p.unlink()
+        rng = np.random.default_rng(0)
+        base = rng.integers(0, 255, (h, w, 3), dtype=np.uint8)
+        secret = rng.integers(0, 255, (h, w, 3), dtype=np.uint8)
+        outputs = []
+        for n, hidden in enumerate((secret, 255 - secret)):
+            frame = base.copy()
+            frame[mask] = hidden[mask]
+            for i in self.indices:
+                cv2.imwrite(str(self.frames / f"{i:04d}.png"), frame)
+            out = Path(self._tmp.name) / f"transition{n}.avi"
+            self.export_video.export_anonymized_video(
+                self.video_dir, out, fps=10, codec="FFV1", blur_strength=15)
+            cap = cv2.VideoCapture(str(out))
+            frames = [cap.read()[1] for _ in self.indices]
+            cap.release()
+            outputs.append(frames[self.indices.index(10001)])
+        np.testing.assert_array_equal(outputs[0], outputs[1])
+
 
 if __name__ == "__main__":
     unittest.main()
